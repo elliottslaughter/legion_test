@@ -1260,7 +1260,7 @@ namespace Realm {
       BarrierAdjustMessage::Message::add_handler_entries("Barrier Adjust AM");
       BarrierSubscribeMessage::Message::add_handler_entries("Barrier Subscribe AM");
       BarrierTriggerMessage::Message::add_handler_entries("Barrier Trigger AM");
-      BarrierMigrationMessage::Message::add_handler_entries("Barrier Migration AM");
+      BarrierStrategyMessage::Message::add_handler_entries("Barrier Strategy AM");
       MetadataRequestMessage::Message::add_handler_entries("Metadata Request AM");
       MetadataResponseMessage::Message::add_handler_entries("Metadata Response AM");
       MetadataInvalidateMessage::Message::add_handler_entries("Metadata Invalidate AM");
