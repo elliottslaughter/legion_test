@@ -18,6 +18,9 @@
 #ifndef REALM_THREADS_H
 #define REALM_THREADS_H
 
+// MOVE THIS
+#define REALM_USE_SUBPROCESSES
+
 #include "realm/realm_config.h"
 #include "realm/activemsg.h"
 
@@ -76,6 +79,10 @@ namespace Realm {
 
 #ifdef REALM_USE_PAPI
   class PAPICounters;
+#endif
+
+#ifdef REALM_USE_SUBPROCESSES
+  class Subprocess;
 #endif
 
   //template <class CONDTYPE> class ThreadWaker;
@@ -224,6 +231,10 @@ namespace Realm {
 #ifdef REALM_USE_PAPI
     PAPICounters *papi_counters;
 #endif
+
+#ifdef REALM_USE_SUBPROCESSES
+    Subprocess *subprocess;
+#endif
   };
 
   class ThreadScheduler {
@@ -313,6 +324,9 @@ namespace Realm {
     WithDefault<CoreUsage, CORE_USAGE_SHARED>  ldst_usage;  // "memory" datapath usage
     WithDefault<ptrdiff_t, STACK_SIZE_DEFAULT> max_stack_size;
     WithDefault<ptrdiff_t, HEAP_SIZE_DEFAULT>  max_heap_size;
+#ifdef REALM_USE_SUBPROCESSES
+    WithDefault<bool, false>                   use_subprocess;
+#endif
 
     CoreReservationParameters(void);
 
@@ -323,6 +337,9 @@ namespace Realm {
     CoreReservationParameters& set_ldst_usage(CoreUsage new_ldst_usage);
     CoreReservationParameters& set_max_stack_size(ptrdiff_t new_max_stack_size);
     CoreReservationParameters& set_max_heap_size(ptrdiff_t new_max_heap_size);
+#ifdef REALM_USE_SUBPROCESSES
+    CoreReservationParameters& set_use_subprocess(bool new_use_subprocess);
+#endif
   };
 
   class CoreReservationSet;

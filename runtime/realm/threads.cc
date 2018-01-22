@@ -53,6 +53,12 @@ inline void makecontext_wrap(ucontext_t *u, void (*fn)(), int args, ...) { makec
 #endif
 #endif
 
+#ifdef REALM_USE_SUBPROCESSES
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#endif
+
 #ifdef REALM_USE_HWLOC
 #include <hwloc.h>
 #endif
@@ -108,6 +114,133 @@ namespace Realm {
     /*extern*/ __thread Thread *current_thread = 0;
   };
 
+#ifdef REALM_USE_SUBPROCESSES
+  ////////////////////////////////////////////////////////////////////////
+  //
+  // class Subprocess
+
+  Logger log_subproc("subproc");
+
+  class SubprocessManager;
+
+  class Subprocess {
+  public:
+    Subprocess(const std::string &_name);
+    ~Subprocess(void);
+
+    void start(void);
+    void stop(void);
+
+  protected:
+    static Subprocess *my_subprocess;
+
+    std::string name;
+    pid_t parent_pid;
+    pid_t child_pid;
+    int p2c_pipe[2];
+    int c2p_pipe[2];
+  };
+
+  // this should NOT be in a shared memory area - we want distinct copies
+  //  for each subprocess
+  /*static*/ Subprocess *Subprocess::my_subprocess = 0;
+
+  Subprocess::Subprocess(const std::string &_name)
+    : name(_name)
+    , parent_pid(getpid())
+    , child_pid(-1)
+  {}
+
+  Subprocess::~Subprocess(void)
+  {
+    // should have already been cleaned up
+    assert(child_pid == -1);
+  }
+
+  void Subprocess::start(void)
+  {
+    assert(child_pid == -1);
+    // create the pipes that allow communication to/from the subprocess
+    CHECK_LIBC( pipe(p2c_pipe) );
+    CHECK_LIBC( pipe(c2p_pipe) );
+
+    log_subproc.info() << "subprocess '" << name << "': about to fork";
+
+    pid_t new_child = fork();
+    if(new_child == -1) {
+      std::cerr << "ERROR: " __FILE__ ":" << __LINE__ << ": fork() = -1 (" << strerror(errno) << ")" << std::endl;
+      assert(0);
+    }
+
+    if(new_child != 0) {
+      // in parent process
+      log_subproc.info() << "subprocess '" << name << "': in master, child pid = " << new_child;
+      // both sides are writing this, but it is to the same value
+      child_pid = new_child;
+      // close ends of pipe we don't use
+      CHECK_LIBC( close(p2c_pipe[0]) );
+      CHECK_LIBC( close(c2p_pipe[1]) );
+      return;
+    } else {
+      // in child process
+      log_subproc.info() << "subprocess '" << name << "': in child, my pid = " << getpid();
+      // both sides are writing this, but it is to the same value
+      child_pid = getpid();
+      // close ends of pipe we don't use
+      CHECK_LIBC( close(p2c_pipe[1]) );
+      CHECK_LIBC( close(c2p_pipe[0]) );
+
+      my_subprocess = this;
+
+      // message handling loop here
+
+      log_subproc.info() << "subprocess '" << name << "': child terminating";
+
+      // done with the pipe now
+      CHECK_LIBC( close(p2c_pipe[0]) );
+      CHECK_LIBC( close(c2p_pipe[1]) );
+
+      exit(0);  // should this be _exit?
+    }
+  }
+
+  void Subprocess::stop(void)
+  {
+    assert(child_pid != -1);
+
+    // send a message to subprocess telling it to stop
+
+    // wait for it to actually stop
+    log_subproc.info() << "subprocess '" << name << "': waiting for child termination";
+    int status;
+    pid_t pid = waitpid(child_pid, &status, 0);
+    assert(pid == child_pid);
+    if(status != 0)
+      log_subproc.info() << "subprocess '" << name << "': child status = " << status;
+
+    child_pid = -1;
+    // done with the pipe now
+    CHECK_LIBC( close(p2c_pipe[1]) );
+    CHECK_LIBC( close(c2p_pipe[0]) );
+  }
+
+
+  ////////////////////////////////////////////////////////////////////////
+  //
+  // class SubprocessManager
+
+  class SubprocessManager {
+  public:
+    static Subprocess *create_subprocess(const std::string &name);
+  };
+
+  /*static*/ Subprocess *SubprocessManager::create_subprocess(const std::string &name)
+  {
+    return new Subprocess(name);
+  }
+#endif
+
+
   ////////////////////////////////////////////////////////////////////////
   //
   // class CoreReservation
@@ -132,6 +265,9 @@ namespace Realm {
 #ifndef __MACH__
     bool restrict_cpus;  // if true, thread is confined to set below
     cpu_set_t allowed_cpus;
+#endif
+#ifdef REALM_USE_SUBPROCESSES
+    Subprocess *subprocess;
 #endif
   };
 
@@ -170,8 +306,15 @@ namespace Realm {
     //  allocations
     for(std::map<CoreReservation *, CoreReservation::Allocation *>::iterator it = allocations.begin();
 	it != allocations.end();
-	it++)
+	it++) {
+#ifdef REALM_USE_SUBPROCESSES
+      if(it->second->subprocess) {
+        it->second->subprocess->stop();
+        delete it->second->subprocess;
+      }
+#endif
       delete it->second;
+    }
     allocations.clear();
   }
 
@@ -431,9 +574,20 @@ namespace Realm {
 #endif
       }
 
+#ifdef REALM_USE_SUBPROCESSES
+      if(rsrv->params.use_subprocess) {
+        alloc->subprocess = new Subprocess(rsrv->name);
+	alloc->subprocess->start();
+      } else
+	alloc->subprocess = 0;
+#endif
+
       if(rsrv->allocation) {
 	log_thread.info() << "replacing allocation for reservation '" << rsrv->name << "'";
 	CoreReservation::Allocation *old_alloc = rsrv->allocation;
+#ifdef REALM_USE_SUBPROCESSES
+	assert(old_alloc->subprocess == 0);
+#endif
 	rsrv->allocation = alloc;
 	delete old_alloc; // TODO: reference count once we allow updates
       } else
@@ -471,9 +625,9 @@ namespace Realm {
 
 	CoreReservation::Allocation *alloc = new CoreReservation::Allocation;
 
-	alloc->exclusive_ownership = true;  // unless we set it false below
+	alloc->exclusive_ownership = false; // all cores are shared
 #ifndef __MACH__
-	alloc->restrict_cpus = false; // unless we set it to true below
+	alloc->restrict_cpus = false;
 	CPU_ZERO(&alloc->allowed_cpus);
 #endif
 	rsrv->allocation = alloc;

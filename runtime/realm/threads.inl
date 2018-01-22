@@ -395,6 +395,13 @@ namespace Realm {
     return *this;
   }
 
+#ifdef REALM_USE_SUBPROCESSES
+  inline CoreReservationParameters& CoreReservationParameters::set_use_subprocess(bool new_use_subprocess)
+  {
+    this->use_subprocess = new_use_subprocess;
+    return *this;
+  }
+#endif
 
 };
 
