@@ -122,16 +122,61 @@ namespace Realm {
   Logger log_subproc("subproc");
 
   class SubprocessManager;
+  class KernelThread;
+#ifdef REALM_USE_USER_THREADS
+  class UserThread;
+#endif
 
+#ifdef REALM_USE_SUBPROCESSES
   class Subprocess {
   public:
     Subprocess(const std::string &_name);
     ~Subprocess(void);
 
+    bool in_parent(void) const;
+    bool in_child(void) const;
+
     void start(void);
     void stop(void);
 
+    void start_kernel_thread(KernelThread *thread,
+			     const ThreadLaunchParameters &params,
+			     const CoreReservation &rsrv);
+
+#ifdef REALM_USE_USER_THREADS
+    void start_user_thread(UserThread *thread,
+			   const ThreadLaunchParameters &params,
+			   const CoreReservation &rsrv);
+#endif
+
   protected:
+    enum MessageTypes {
+      MSG_NOOP,
+      MSG_PING,
+      MSG_PONG,
+      MSG_SHUTDOWN,
+      MSG_START_KERNEL_THREAD,
+#ifdef REALM_USE_USER_THREADS
+      MSG_START_USER_THREAD,
+#endif
+    };
+
+    struct MessageHeader {
+      MessageHeader(void) {}
+      MessageHeader(short _msgtype, short _msgsize)
+	: msgtype(_msgtype), msgsize(_msgsize) {}
+
+      short msgtype;
+      short msgsize;
+    };
+
+    template <typename T>
+    struct StartThreadPayload {
+      T *thread;
+      ThreadLaunchParameters params;
+      const CoreReservation *rsrv;
+    };
+
     static Subprocess *my_subprocess;
 
     std::string name;
@@ -140,90 +185,7 @@ namespace Realm {
     int p2c_pipe[2];
     int c2p_pipe[2];
   };
-
-  // this should NOT be in a shared memory area - we want distinct copies
-  //  for each subprocess
-  /*static*/ Subprocess *Subprocess::my_subprocess = 0;
-
-  Subprocess::Subprocess(const std::string &_name)
-    : name(_name)
-    , parent_pid(getpid())
-    , child_pid(-1)
-  {}
-
-  Subprocess::~Subprocess(void)
-  {
-    // should have already been cleaned up
-    assert(child_pid == -1);
-  }
-
-  void Subprocess::start(void)
-  {
-    assert(child_pid == -1);
-    // create the pipes that allow communication to/from the subprocess
-    CHECK_LIBC( pipe(p2c_pipe) );
-    CHECK_LIBC( pipe(c2p_pipe) );
-
-    log_subproc.info() << "subprocess '" << name << "': about to fork";
-
-    pid_t new_child = fork();
-    if(new_child == -1) {
-      std::cerr << "ERROR: " __FILE__ ":" << __LINE__ << ": fork() = -1 (" << strerror(errno) << ")" << std::endl;
-      assert(0);
-    }
-
-    if(new_child != 0) {
-      // in parent process
-      log_subproc.info() << "subprocess '" << name << "': in master, child pid = " << new_child;
-      // both sides are writing this, but it is to the same value
-      child_pid = new_child;
-      // close ends of pipe we don't use
-      CHECK_LIBC( close(p2c_pipe[0]) );
-      CHECK_LIBC( close(c2p_pipe[1]) );
-      return;
-    } else {
-      // in child process
-      log_subproc.info() << "subprocess '" << name << "': in child, my pid = " << getpid();
-      // both sides are writing this, but it is to the same value
-      child_pid = getpid();
-      // close ends of pipe we don't use
-      CHECK_LIBC( close(p2c_pipe[1]) );
-      CHECK_LIBC( close(c2p_pipe[0]) );
-
-      my_subprocess = this;
-
-      // message handling loop here
-
-      log_subproc.info() << "subprocess '" << name << "': child terminating";
-
-      // done with the pipe now
-      CHECK_LIBC( close(p2c_pipe[0]) );
-      CHECK_LIBC( close(c2p_pipe[1]) );
-
-      exit(0);  // should this be _exit?
-    }
-  }
-
-  void Subprocess::stop(void)
-  {
-    assert(child_pid != -1);
-
-    // send a message to subprocess telling it to stop
-
-    // wait for it to actually stop
-    log_subproc.info() << "subprocess '" << name << "': waiting for child termination";
-    int status;
-    pid_t pid = waitpid(child_pid, &status, 0);
-    assert(pid == child_pid);
-    if(status != 0)
-      log_subproc.info() << "subprocess '" << name << "': child status = " << status;
-
-    child_pid = -1;
-    // done with the pipe now
-    CHECK_LIBC( close(p2c_pipe[1]) );
-    CHECK_LIBC( close(c2p_pipe[0]) );
-  }
-
+#endif
 
   ////////////////////////////////////////////////////////////////////////
   //
@@ -867,6 +829,15 @@ namespace Realm {
   void KernelThread::start_thread(const ThreadLaunchParameters& params,
 				  const CoreReservation& rsrv)
   {
+#ifdef REALM_USE_SUBPROCESSES
+    // do we need to send this request to a subprocess?
+    if(rsrv.allocation->subprocess &&
+       !rsrv.allocation->subprocess->in_child()) {
+      rsrv.allocation->subprocess->start_kernel_thread(this, params, rsrv);
+      return;
+    }
+#endif
+
     // before we create any threads, make sure we have our signal handler registered
     register_handler();
 
@@ -1060,7 +1031,8 @@ namespace Realm {
 
     virtual ~UserThread(void);
 
-    void start_thread(const ThreadLaunchParameters& params);
+    void start_thread(const ThreadLaunchParameters& params,
+		      const CoreReservation& rsrv);
 
     virtual void join(void);
     virtual void detach(void);
@@ -1148,17 +1120,35 @@ namespace Realm {
     }
   }
 
-  void UserThread::start_thread(const ThreadLaunchParameters& params)
+  void UserThread::start_thread(const ThreadLaunchParameters& params,
+				const CoreReservation& rsrv)
   {
+#ifdef REALM_USE_SUBPROCESSES
+    // do we need to send this request to a subprocess?
+    if(rsrv.allocation->subprocess &&
+       !rsrv.allocation->subprocess->in_child()) {
+      rsrv.allocation->subprocess->start_user_thread(this, params, rsrv);
+      return;
+    }
+#endif
+
     // figure out how big the stack should be
     if(params.stack_size != params.STACK_SIZE_DEFAULT) {
+      // make sure it's not too large
+      assert((rsrv.params.max_stack_size == rsrv.params.STACK_SIZE_DEFAULT) ||
+	     (params.stack_size <= rsrv.params.max_stack_size));
+
       stack_size = params.stack_size;
       // it turns out MacOS behaves REALLY strangely with a stack < 32KB, and there
       //  make be some lower limit in Linux-land too, so clamp to 64KB to be safe
       if(stack_size < (64 << 10))
 	stack_size = 64 << 10;
     } else {
-      stack_size = 2 << 20; // pick something - 2MB ?
+      // does the entire core reservation have a non-standard stack size?
+      if(rsrv.params.max_stack_size != rsrv.params.STACK_SIZE_DEFAULT)
+	stack_size = rsrv.params.max_stack_size;
+      else
+	stack_size = 2 << 20; // pick something - 2MB ?
     }
 
     stack_base = malloc(stack_size);
@@ -1309,12 +1299,17 @@ namespace Realm {
 #ifdef REALM_USE_USER_THREADS
   /*static*/ Thread *Thread::create_user_thread_untyped(void *target, void (*entry_wrapper)(void *),
 							const ThreadLaunchParameters& params,
+							CoreReservation& rsrv,
 							ThreadScheduler *_scheduler)
   {
     UserThread *t = new UserThread(target, entry_wrapper, _scheduler);
 
-    // no need to wait on an allocation - the host thread will take care of that
-    t->start_thread(params);
+    // if we have an allocation, we can start the thread immediately
+    if(rsrv.allocation) {
+      t->start_thread(params, rsrv);
+    } else {
+      rsrv.add_listener(new DeferredThreadStart<UserThread>(t, params));
+    }
 
     return t;
   }
@@ -1325,6 +1320,257 @@ namespace Realm {
     //   of sanity-checking
     UserThread::user_switch((UserThread *)switch_to);
   }
+#endif
+
+
+#ifdef REALM_USE_SUBPROCESSES
+  ////////////////////////////////////////////////////////////////////////
+  //
+  // class Subprocess
+
+  // this should NOT be in a shared memory area - we want distinct copies
+  //  for each subprocess
+  /*static*/ Subprocess *Subprocess::my_subprocess = 0;
+
+  Subprocess::Subprocess(const std::string &_name)
+    : name(_name)
+    , parent_pid(getpid())
+    , child_pid(-1)
+  {}
+
+  Subprocess::~Subprocess(void)
+  {
+    // should have already been cleaned up
+    assert(child_pid == -1);
+  }
+
+  bool Subprocess::in_parent(void) const
+  {
+    return(getpid() == parent_pid);
+  }
+
+  bool Subprocess::in_child(void) const
+  {
+    return(my_subprocess == this);
+  }
+
+  static bool read_exact(int fd, void *dest, size_t bytes)
+  {
+    size_t done = 0;
+    while(done < bytes) {
+      errno = 0;
+      ssize_t amt = read(fd,
+			 static_cast<char *>(dest) + done,
+			 bytes - done);
+      if(amt > 0) {
+	done += amt;
+      } else {
+	// error message for short read and I/O error are different
+	if(amt == 0)
+	  log_subproc.error() << "short read - got " << done << " out of " << bytes << " bytes";
+	else
+	  log_subproc.error() << "error during read: errno=" << errno;
+	return false;
+      }
+    }
+    return true;
+  }
+
+  template <typename T>
+  static bool read_exact(int fd, T& dest)
+  {
+    return read_exact(fd, &dest, sizeof(T));
+  }
+
+  static bool write_exact(int fd, const void *dest, size_t bytes)
+  {
+    size_t done = 0;
+    while(done < bytes) {
+      errno = 0;
+      ssize_t amt = write(fd,
+			  static_cast<const char *>(dest) + done,
+			  bytes - done);
+      if(amt > 0) {
+	done += amt;
+      } else {
+	// error message for short write and I/O error are different
+	if(amt == 0)
+	  log_subproc.error() << "short write - sent " << done << " out of " << bytes << " bytes";
+	else
+	  log_subproc.error() << "error during write: errno=" << errno;
+	return false;
+      }
+    }
+    return true;
+  }
+
+  template <typename T>
+  static bool write_exact(int fd, T& dest)
+  {
+    return write_exact(fd, &dest, sizeof(T));
+  }
+
+  void Subprocess::start(void)
+  {
+    assert(child_pid == -1);
+    // create the pipes that allow communication to/from the subprocess
+    CHECK_LIBC( pipe(p2c_pipe) );
+    CHECK_LIBC( pipe(c2p_pipe) );
+
+    log_subproc.info() << "subprocess '" << name << "': about to fork";
+
+    pid_t new_child = fork();
+    if(new_child == -1) {
+      std::cerr << "ERROR: " __FILE__ ":" << __LINE__ << ": fork() = -1 (" << strerror(errno) << ")" << std::endl;
+      assert(0);
+    }
+
+    if(new_child != 0) {
+      // in parent process
+      log_subproc.info() << "subprocess '" << name << "': in master, child pid = " << new_child;
+      // both sides are writing this, but it is to the same value
+      child_pid = new_child;
+      // close ends of pipe we don't use
+      CHECK_LIBC( close(p2c_pipe[0]) );
+      CHECK_LIBC( close(c2p_pipe[1]) );
+      return;
+    } else {
+      // in child process
+      log_subproc.info() << "subprocess '" << name << "': in child, my pid = " << getpid();
+      // both sides are writing this, but it is to the same value
+      child_pid = getpid();
+      // close ends of pipe we don't use
+      CHECK_LIBC( close(p2c_pipe[1]) );
+      CHECK_LIBC( close(c2p_pipe[0]) );
+
+      my_subprocess = this;
+
+      // message handling loop here
+      bool continue_running = true;
+      while(continue_running) {
+	MessageHeader hdr;
+	if(!read_exact(p2c_pipe[0], hdr))
+	  break;
+	log_subproc.debug() << "child received message: type=" << hdr.msgtype << " size=" << hdr.msgsize;
+
+	switch(hdr.msgtype) {
+	case MSG_NOOP:  /* do nothing */ break;
+
+	case MSG_SHUTDOWN:
+	  {
+	    continue_running = false;
+	    break;
+	  }
+
+	case MSG_PING:
+	  {
+	    // respond with pong
+	    MessageHeader resp(MSG_PONG, 0);
+	    if(!write_exact(c2p_pipe[1], resp))
+	      continue_running = false;
+	    break;
+	  }
+
+	case MSG_START_KERNEL_THREAD:
+	  {
+	    StartThreadPayload<KernelThread> payload;
+	    read_exact(p2c_pipe[0], payload);
+	    payload.thread->start_thread(payload.params,
+					 *(payload.rsrv));
+	    break;
+	  }
+
+#ifdef REALM_USE_USER_THREADS
+	case MSG_START_USER_THREAD:
+	  {
+	    StartThreadPayload<UserThread> payload;
+	    read_exact(p2c_pipe[0], payload);
+	    payload.thread->start_thread(payload.params,
+					 *(payload.rsrv));
+	    break;
+	  }
+#endif
+
+	default:
+	  log_subproc.fatal() << "child process received unexpected message type: " << hdr.msgtype;
+	  assert(0);
+	}
+      }
+
+      log_subproc.info() << "subprocess '" << name << "': child terminating";
+
+      // done with the pipe now
+      CHECK_LIBC( close(p2c_pipe[0]) );
+      CHECK_LIBC( close(c2p_pipe[1]) );
+
+      exit(0);  // should this be _exit?
+    }
+  }
+
+  void Subprocess::stop(void)
+  {
+    assert(child_pid != -1);
+
+    // send a message to subprocess telling it to stop
+    MessageHeader req(MSG_SHUTDOWN, 0);
+    if(!write_exact(p2c_pipe[1], req))
+      log_subproc.warning() << "could not send shutdown request to child: pid=" << child_pid;
+
+    // wait for it to actually stop
+    log_subproc.info() << "subprocess '" << name << "': waiting for child termination";
+    int status;
+    pid_t pid = waitpid(child_pid, &status, 0);
+    assert(pid == child_pid);
+    if(status != 0)
+      log_subproc.info() << "subprocess '" << name << "': child status = " << status;
+
+    child_pid = -1;
+    // done with the pipe now
+    CHECK_LIBC( close(p2c_pipe[1]) );
+    CHECK_LIBC( close(c2p_pipe[0]) );
+  }
+
+  void Subprocess::start_kernel_thread(KernelThread *thread,
+				       const ThreadLaunchParameters &params,
+				       const CoreReservation &rsrv)
+  {
+    // only handle requests from the master for now
+    assert(in_parent());
+
+    MessageHeader hdr(MSG_START_KERNEL_THREAD,
+		      sizeof(StartThreadPayload<KernelThread>));
+    StartThreadPayload<KernelThread> payload;
+    payload.thread = thread;
+    payload.params = params;
+    // NOTE: we are relying here on the reservation being stable and
+    //  in shared memory
+    payload.rsrv = &rsrv;
+
+    write_exact(p2c_pipe[1], hdr);
+    write_exact(p2c_pipe[1], payload);
+  }
+
+#ifdef REALM_USE_USER_THREADS
+  void Subprocess::start_user_thread(UserThread *thread,
+				       const ThreadLaunchParameters &params,
+				       const CoreReservation &rsrv)
+  {
+    // only handle requests from the master for now
+    assert(in_parent());
+
+    MessageHeader hdr(MSG_START_USER_THREAD,
+		      sizeof(StartThreadPayload<UserThread>));
+    StartThreadPayload<UserThread> payload;
+    payload.thread = thread;
+    payload.params = params;
+    // NOTE: we are relying here on the reservation being stable and
+    //  in shared memory
+    payload.rsrv = &rsrv;
+
+    write_exact(p2c_pipe[1], hdr);
+    write_exact(p2c_pipe[1], payload);
+  }
+#endif
 #endif
 
 
