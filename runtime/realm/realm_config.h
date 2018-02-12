@@ -73,4 +73,7 @@ namespace Realm {
 };
 #endif
 
+// TODO: description and optional-ness
+#define REALM_USE_SUBPROCESSES
+
 #endif

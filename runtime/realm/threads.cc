@@ -143,6 +143,8 @@ namespace Realm {
 			     const ThreadLaunchParameters &params,
 			     const CoreReservation &rsrv);
 
+    void join_kernel_thread(KernelThread *thread);
+
 #ifdef REALM_USE_USER_THREADS
     void start_user_thread(UserThread *thread,
 			   const ThreadLaunchParameters &params,
@@ -159,6 +161,8 @@ namespace Realm {
 #ifdef REALM_USE_USER_THREADS
       MSG_START_USER_THREAD,
 #endif
+      MSG_JOIN_KERNEL_THREAD_REQ,
+      MSG_JOIN_KERNEL_THREAD_ACK,
     };
 
     struct MessageHeader {
@@ -175,6 +179,11 @@ namespace Realm {
       T *thread;
       ThreadLaunchParameters params;
       const CoreReservation *rsrv;
+    };
+
+    template <typename T>
+    struct JoinThreadPayload {
+      T *thread;
     };
 
     static Subprocess *my_subprocess;
@@ -782,6 +791,9 @@ namespace Realm {
 
     void *target;
     void (*entry_wrapper)(void *);
+#ifdef REALM_USE_SUBPROCESSES
+    Subprocess *subprocess;
+#endif
     pthread_t thread;
     bool ok_to_delete;
   };
@@ -789,6 +801,9 @@ namespace Realm {
   KernelThread::KernelThread(void *_target, void (*_entry_wrapper)(void *),
 			     ThreadScheduler *_scheduler)
     : Thread(_scheduler), target(_target), entry_wrapper(_entry_wrapper)
+#ifdef REALM_USE_SUBPROCESSES
+    , subprocess(0)
+#endif
     , ok_to_delete(false)
   {
   }
@@ -831,9 +846,9 @@ namespace Realm {
   {
 #ifdef REALM_USE_SUBPROCESSES
     // do we need to send this request to a subprocess?
-    if(rsrv.allocation->subprocess &&
-       !rsrv.allocation->subprocess->in_child()) {
-      rsrv.allocation->subprocess->start_kernel_thread(this, params, rsrv);
+    subprocess = rsrv.allocation->subprocess;
+    if(subprocess && !subprocess->in_child()) {
+      subprocess->start_kernel_thread(this, params, rsrv);
       return;
     }
 #endif
@@ -899,6 +914,13 @@ namespace Realm {
 
   void KernelThread::join(void)
   {
+#ifdef REALM_USE_SUBPROCESSES
+    // do we need to send this request to a subprocess?
+    if(subprocess && !subprocess->in_child()) {
+      subprocess->join_kernel_thread(this);
+      return;
+    }
+#endif
     CHECK_PTHREAD( pthread_join(thread, 0 /* ignore retval */) );
     ok_to_delete = true;
   }
@@ -1362,6 +1384,7 @@ namespace Realm {
       ssize_t amt = read(fd,
 			 static_cast<char *>(dest) + done,
 			 bytes - done);
+      //log_subproc.print() << "read fd=" << fd << " amt=" << amt;
       if(amt > 0) {
 	done += amt;
       } else {
@@ -1390,6 +1413,7 @@ namespace Realm {
       ssize_t amt = write(fd,
 			  static_cast<const char *>(dest) + done,
 			  bytes - done);
+      //log_subproc.print() << "write fd=" << fd << " amt=" << amt;
       if(amt > 0) {
 	done += amt;
       } else {
@@ -1480,6 +1504,18 @@ namespace Realm {
 	    break;
 	  }
 
+	case MSG_JOIN_KERNEL_THREAD_REQ:
+	  {
+	    JoinThreadPayload<KernelThread> payload;
+	    read_exact(p2c_pipe[0], payload);
+	    payload.thread->join();
+	    MessageHeader resp(MSG_JOIN_KERNEL_THREAD_ACK, sizeof(payload));
+	    if(!write_exact(c2p_pipe[1], resp) ||
+	       !write_exact(c2p_pipe[1], payload))
+	      continue_running = false;
+	    break;
+	  }
+
 #ifdef REALM_USE_USER_THREADS
 	case MSG_START_USER_THREAD:
 	  {
@@ -1548,6 +1584,27 @@ namespace Realm {
 
     write_exact(p2c_pipe[1], hdr);
     write_exact(p2c_pipe[1], payload);
+  }
+
+  void Subprocess::join_kernel_thread(KernelThread *thread)
+  {
+    // only handle requests from the master for now
+    assert(in_parent());
+
+    MessageHeader hdr(MSG_JOIN_KERNEL_THREAD_REQ,
+		      sizeof(JoinThreadPayload<KernelThread>));
+    JoinThreadPayload<KernelThread> payload;
+    payload.thread = thread;
+
+    write_exact(p2c_pipe[1], hdr);
+    write_exact(p2c_pipe[1], payload);
+
+    // need a response - TODO: deal with other messages while waiting?
+    read_exact(c2p_pipe[0], hdr);
+    assert(hdr.msgtype == MSG_JOIN_KERNEL_THREAD_ACK);
+    assert(hdr.msgsize == sizeof(payload));
+    read_exact(c2p_pipe[0], payload);
+    assert(payload.thread == thread);
   }
 
 #ifdef REALM_USE_USER_THREADS

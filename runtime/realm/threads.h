@@ -18,9 +18,6 @@
 #ifndef REALM_THREADS_H
 #define REALM_THREADS_H
 
-// MOVE THIS
-#define REALM_USE_SUBPROCESSES
-
 #include "realm/realm_config.h"
 #include "realm/activemsg.h"
 

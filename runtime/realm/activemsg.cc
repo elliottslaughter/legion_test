@@ -2875,7 +2875,15 @@ extern void record_message(NodeID source, bool sent_reply)
 GASNetHSL::GASNetHSL(void)
 {
   assert(sizeof(mutex) <= sizeof(placeholder));
+#ifdef REALM_USE_SUBPROCESSES
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+  pthread_mutex_init(&mutex, &attr);
+  pthread_mutexattr_destroy(&attr);
+#else
   pthread_mutex_init(&mutex, 0);
+#endif
 }
 
 GASNetHSL::~GASNetHSL(void)
@@ -2897,7 +2905,15 @@ GASNetCondVar::GASNetCondVar(GASNetHSL &_mutex)
   : mutex(_mutex)
 {
   assert(sizeof(condvar) <= sizeof(placeholder));
+#ifdef REALM_USE_SUBPROCESSES
+  pthread_condattr_t attr;
+  pthread_condattr_init(&attr);
+  pthread_condattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+  pthread_cond_init(&condvar, &attr);
+  pthread_condattr_destroy(&attr);
+#else
   pthread_cond_init(&condvar, 0);
+#endif
 }
 
 GASNetCondVar::~GASNetCondVar(void)
