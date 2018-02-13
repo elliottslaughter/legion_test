@@ -981,7 +981,7 @@ namespace Realm {
     params.set_fpu_usage(params.CORE_USAGE_EXCLUSIVE);
     params.set_ldst_usage(params.CORE_USAGE_SHARED);
     params.set_max_stack_size(_stack_size);
-    params.set_use_subprocess(true);
+    //params.set_use_subprocess(true);
 
     std::string name = stringbuilder() << "CPU proc " << _me;
 
