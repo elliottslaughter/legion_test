@@ -165,8 +165,10 @@ namespace Realm {
 	  continue;
 
 	if(mi.bytes_available >= mem_size) {
-	  m->numa_mem_bases[mi.node_id] = 0;
-	  m->numa_mem_sizes[mi.node_id] = mem_size;
+	  ShareableMemory &sm = m->numa_mem_mappings[mi.node_id];
+	  sm.size = mem_size;
+	  sm.numa_domain = mi.node_id;
+	  sm.pin_memory = m->cfg_pin_memory;
 	} else {
 	  // TODO: fatal error?
 	  log_numa.warning() << "insufficient memory in NUMA node " << mi.node_id << " (" << mem_size << " > " << mi.bytes_available << " bytes) - skipping allocation";
@@ -196,19 +198,14 @@ namespace Realm {
       Module::initialize(runtime);
 
       // memory allocations are performed here
-      for(std::map<int, void *>::iterator it = numa_mem_bases.begin();
-	  it != numa_mem_bases.end();
+      for(std::map<int, ShareableMemory>::iterator it = numa_mem_mappings.begin();
+	  it != numa_mem_mappings.end();
 	  ++it) {
-	size_t mem_size = numa_mem_sizes[it->first];
-	assert(mem_size > 0);
-	void *base = numasysif_alloc_mem(it->first,
-					 mem_size,
-					 cfg_pin_memory);
-	if(!base) {
-	  log_numa.fatal() << "allocation of " << mem_size << " bytes in NUMA node " << it->first << " failed!";
+	bool ok = it->second.map();
+	if(!ok) {
+	  log_numa.fatal() << "allocation of " << it->second.size << " bytes in NUMA node " << it->first << " failed!";
 	  assert(false);
 	}
-	it->second = base;
       }
     }
 
@@ -218,12 +215,12 @@ namespace Realm {
     {
       Module::create_memories(runtime);
 
-      for(std::map<int, void *>::iterator it = numa_mem_bases.begin();
-	  it != numa_mem_bases.end();
+      for(std::map<int, ShareableMemory>::iterator it = numa_mem_mappings.begin();
+	  it != numa_mem_mappings.end();
 	  ++it) {
 	int mem_node = it->first;
-	void *base_ptr = it->second;
-	size_t mem_size = numa_mem_sizes[it->first];
+	void *base_ptr = it->second.base;
+	size_t mem_size = it->second.size;
 	assert(mem_size > 0);
 
 	Memory m = runtime->next_local_memory_id();
@@ -325,14 +322,12 @@ namespace Realm {
       Module::cleanup();
 
       // free our allocations here
-      for(std::map<int, void *>::iterator it = numa_mem_bases.begin();
-	  it != numa_mem_bases.end();
+      for(std::map<int, ShareableMemory>::iterator it = numa_mem_mappings.begin();
+	  it != numa_mem_mappings.end();
 	  ++it) {
-	size_t mem_size = numa_mem_sizes[it->first];
-	assert(mem_size > 0);
-	bool ok = numasysif_free_mem(it->first, it->second, mem_size);
+	bool ok = it->second.unmap();
 	if(!ok)
-	  log_numa.error() << "failed to free memory in NUMA node " << it->first << ": ptr=" << it->second;
+	  log_numa.error() << "failed to free memory in NUMA node " << it->first << ": ptr=" << it->second.base;
       }
     }
 

@@ -28,6 +28,7 @@
 
 #include "realm/event_impl.h"
 #include "realm/rsrv_impl.h"
+#include "realm/custom_malloc.h"
 
 #ifdef USE_HDF
 #include <hdf5.h>
@@ -180,7 +181,8 @@ namespace Realm {
       virtual void *local_reg_base(void);
 
     public: //protected:
-      char *base, *base_orig;
+      ShareableMemory mapped_memory;
+      char *base;
       bool prealloced, registered;
     };
 

@@ -20,6 +20,11 @@
 #ifndef REALM_UTILS_H
 #define REALM_UTILS_H
 
+#include <vector>
+#include <map>
+#include <string>
+#include <sstream>
+
 namespace Realm {
     
   // helpers for deleting contents STL containers of pointers-to-things
@@ -61,6 +66,23 @@ namespace Realm {
     std::stringstream ss;
   };
 
+  // little helper class that defines a default value for a member variable
+  //  in the header rather than in the containing object's constructor
+  //  implementation
+  template <typename T, T _DEFAULT>
+  struct WithDefault {
+  public:
+    static const T DEFAULT_VALUE = _DEFAULT;
+
+    WithDefault(void) : val(_DEFAULT) {}
+    WithDefault(T _val) : val(_val) {}
+
+    operator T(void) const { return val; }
+    WithDefault<T,_DEFAULT>& operator=(T newval) { val = newval; return *this; }
+
+  protected:
+    T val;
+  };
 
 }; // namespace Realm
 

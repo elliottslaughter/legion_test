@@ -491,14 +491,12 @@ namespace Realm {
       registered = _registered;
     } else {
       // allocate our own space
-      // enforce alignment on the whole memory range
-      base_orig = new char[_size + ALIGNMENT - 1];
-      size_t ofs = reinterpret_cast<size_t>(base_orig) % ALIGNMENT;
-      if(ofs > 0) {
-	base = base_orig + (ALIGNMENT - ofs);
-      } else {
-	base = base_orig;
-      }
+      mapped_memory.size = size;
+      bool ok = mapped_memory.map();
+      assert(ok);
+      base = static_cast<char *>(mapped_memory.base);
+      // alignment should be fine
+      assert((reinterpret_cast<uintptr_t>(base) % ALIGNMENT) == 0);
       prealloced = false;
       assert(!_registered);
       registered = false;
@@ -510,8 +508,10 @@ namespace Realm {
 
   LocalCPUMemory::~LocalCPUMemory(void)
   {
-    if(!prealloced)
-      delete[] base_orig;
+    if(!prealloced) {
+      bool ok = mapped_memory.unmap();
+      assert(ok);
+    }
   }
 
   off_t LocalCPUMemory::alloc_bytes(size_t size)

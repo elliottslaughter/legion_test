@@ -75,5 +75,6 @@ namespace Realm {
 
 // TODO: description and optional-ness
 #define REALM_USE_SUBPROCESSES
+#define REALM_HIJACK_MALLOC
 
 #endif
