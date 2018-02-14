@@ -78,6 +78,9 @@ inline void makecontext_wrap(ucontext_t *u, void (*fn)(), int args, ...) { makec
 #endif
 #endif
 
+// be optimistic and assume everybody has on_exit() for now...
+#define HAVE_ON_EXIT
+
 #ifndef CHECK_LIBC
 #define CHECK_LIBC(cmd) do { \
   errno = 0; \
@@ -187,6 +190,7 @@ namespace Realm {
     };
 
     static Subprocess *my_subprocess;
+    static bool sigchld_handler_registered;
 
     std::string name;
     pid_t parent_pid;
@@ -1353,6 +1357,30 @@ namespace Realm {
   // this should NOT be in a shared memory area - we want distinct copies
   //  for each subprocess
   /*static*/ Subprocess *Subprocess::my_subprocess = 0;
+  /*static*/ bool Subprocess::sigchld_handler_registered = false;
+
+  static void handle_sigchld(int sig)
+  {
+    assert(sig == SIGCHLD);
+    int saved_errno = errno;
+    while(1) {
+      int status;
+      errno = 0;
+      pid_t child = waitpid(-1, &status, WNOHANG | WUNTRACED);
+      if(child == 0) break; // no more children finished
+      if(child == -1) {
+	// ECHILD is ok
+	if(errno == ECHILD) break;
+
+	// anything else is not
+	log_subproc.fatal() << "waitpid returned error code: " << errno << "(" << strerror(errno) << ")";
+	assert(0);
+      }
+      log_subproc.error() << "unexpected termination of child: pid=" << child << " status=" << status << " - application is likely to hang";
+      // TODO: terminate?  mark tasks as failed?
+    }
+    errno = saved_errno;
+  }
 
   Subprocess::Subprocess(const std::string &_name)
     : name(_name)
@@ -1434,9 +1462,26 @@ namespace Realm {
     return write_exact(fd, &dest, sizeof(T));
   }
 
+#ifdef HAVE_ON_EXIT
+  static void on_exit_handler(int exit_code, void *arg)
+  {
+    // skip over any exit handlers registered in the parent process
+    //  by calling _exit here
+    _exit(exit_code);
+  }
+#else
+#endif
+
   void Subprocess::start(void)
   {
     assert(child_pid == -1);
+
+    // register a SIGCHLD handler if we haven't already
+    if(!sigchld_handler_registered) {
+      signal(SIGCHLD, handle_sigchld);
+      sigchld_handler_registered = true;
+    }
+
     // create the pipes that allow communication to/from the subprocess
     CHECK_LIBC( pipe(p2c_pipe) );
     CHECK_LIBC( pipe(c2p_pipe) );
@@ -1468,6 +1513,14 @@ namespace Realm {
       CHECK_LIBC( close(c2p_pipe[0]) );
 
       my_subprocess = this;
+
+      // register atexit/on_exit handler to effectively clear our
+      //  handler list in the subprocess
+#ifdef HAVE_ON_EXIT
+      on_exit(on_exit_handler, 0);
+#else
+      atexit(atexit_handler);
+#endif
 
       // message handling loop here
       bool continue_running = true;
@@ -1547,6 +1600,12 @@ namespace Realm {
   {
     assert(child_pid != -1);
 
+    // block our SIGCHLD handler so that we can catch the result here
+    sigset_t sigset;
+    CHECK_LIBC( sigemptyset(&sigset) );
+    CHECK_LIBC( sigaddset(&sigset, SIGCHLD) );
+    CHECK_LIBC( sigprocmask(SIG_BLOCK, &sigset, 0) );
+
     // send a message to subprocess telling it to stop
     MessageHeader req(MSG_SHUTDOWN, 0);
     if(!write_exact(p2c_pipe[1], req))
@@ -1557,6 +1616,10 @@ namespace Realm {
     int status;
     pid_t pid = waitpid(child_pid, &status, 0);
     assert(pid == child_pid);
+
+    // unblock SIGCHLD handler
+    CHECK_LIBC( sigprocmask(SIG_UNBLOCK, &sigset, 0) );
+
     if(status != 0)
       log_subproc.info() << "subprocess '" << name << "': child status = " << status;
 

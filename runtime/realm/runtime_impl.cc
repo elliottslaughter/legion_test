@@ -616,6 +616,11 @@ namespace Realm {
     // if true, worker threads that might have used user-level thread switching
     //  fall back to kernel threading
     bool force_kernel_threads = false;
+
+#ifdef REALM_USE_SUBPROCESSES
+    // if true, all processors are isolated into their own subprocess
+    bool isolate_all_processors = false;
+#endif
   };
 
   CoreModule::CoreModule(void)
@@ -670,7 +675,11 @@ namespace Realm {
       Processor p = runtime->next_local_processor_id();
       ProcessorImpl *pi = new LocalUtilityProcessor(p, runtime->core_reservation_set(),
 						    stack_size_in_mb << 20,
-						    Config::force_kernel_threads);
+						    Config::force_kernel_threads
+#ifdef REALM_USE_SUBPROCESSES
+						    , Config::isolate_all_processors
+#endif
+						    );
       runtime->add_processor(pi);
     }
 
@@ -678,7 +687,11 @@ namespace Realm {
       Processor p = runtime->next_local_processor_id();
       ProcessorImpl *pi = new LocalIOProcessor(p, runtime->core_reservation_set(),
 					       stack_size_in_mb << 20,
-					       concurrent_io_threads);
+					       concurrent_io_threads
+#ifdef REALM_USE_SUBPROCESSES
+					       , Config::isolate_all_processors
+#endif
+					       );
       runtime->add_processor(pi);
     }
 
@@ -686,7 +699,11 @@ namespace Realm {
       Processor p = runtime->next_local_processor_id();
       ProcessorImpl *pi = new LocalCPUProcessor(p, runtime->core_reservation_set(),
 						stack_size_in_mb << 20,
-						Config::force_kernel_threads);
+						Config::force_kernel_threads
+#ifdef REALM_USE_SUBPROCESSES
+						, Config::isolate_all_processors
+#endif
+						);
       runtime->add_processor(pi);
     }
   }
@@ -1122,6 +1139,9 @@ namespace Realm {
       cp.add_option_int("-realm:eventloopcheck", Config::event_loop_detection_limit);
       cp.add_option_bool("-ll:force_kthreads", Config::force_kernel_threads);
       cp.add_option_bool("-ll:frsrv_fallback", Config::use_fast_reservation_fallback);
+#ifdef REALM_USE_SUBPROCESSES
+      cp.add_option_bool("-ll:isolate_procs", Config::isolate_all_processors);
+#endif
 
       // these are actually parsed in activemsg.cc, but consume them here for now
       size_t dummy = 0;

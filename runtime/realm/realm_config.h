@@ -58,6 +58,10 @@
 #define REALM_USE_OPERATION_TABLE
 #endif
 
+// TODO: description and optional-ness
+#define REALM_USE_SUBPROCESSES
+#define REALM_HIJACK_MALLOC
+
 #ifdef __cplusplus
 // runtime configuration settings
 namespace Realm {
@@ -69,12 +73,13 @@ namespace Realm {
     // if true, worker threads that might have used user-level thread switching
     //  fall back to kernel threading
     extern bool force_kernel_threads;
+
+#ifdef REALM_USE_SUBPROCESSES
+    // if true, all processors are isolated into their own subprocess
+    extern bool isolate_all_processors;
+#endif
   };
 };
 #endif
-
-// TODO: description and optional-ness
-#define REALM_USE_SUBPROCESSES
-#define REALM_HIJACK_MALLOC
 
 #endif

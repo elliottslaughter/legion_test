@@ -80,11 +80,17 @@ namespace Realm {
     LoggerStreamSerialized(T *_stream, bool _delete_inner)
       : stream(_stream), delete_inner(_delete_inner)
     {
+      pthread_mutexattr_t attr;
+      pthread_mutexattr_init(&attr);
+#ifdef REALM_USE_SUBPROCESSES
+      pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+#endif
 #ifndef NDEBUG
       int ret =
 #endif
-	pthread_mutex_init(&mutex, 0);
+	pthread_mutex_init(&mutex, &attr);
       assert(ret == 0);
+      pthread_mutexattr_destroy(&attr);
     }
 
     virtual ~LoggerStreamSerialized(void)

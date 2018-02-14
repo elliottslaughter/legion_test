@@ -192,8 +192,10 @@ namespace Realm {
 
   class BumpAllocator : public Allocator {
   public:
-    BumpAllocator(size_t size);
+    BumpAllocator(void);
     virtual ~BumpAllocator(void);
+
+    void set_pool_location(void *base, size_t bytes);
 
     virtual void *malloc(size_t size, size_t alignment);
     virtual void *realloc(void *oldptr, size_t new_size);
@@ -205,13 +207,14 @@ namespace Realm {
       uintptr_t pool_pos;
       uintptr_t pool_end;
     };
-    PoolDescriptor *pool;
+    PoolDescriptor pool;
     size_t pool_size;
   };
 
-  BumpAllocator::BumpAllocator(size_t size)
-    : pool_size(size)
+  BumpAllocator::BumpAllocator(void)
+    : pool_size(0)
   {
+#if 0
     void *mmap_base = mmap(0, pool_size,
 			   PROT_READ | PROT_WRITE,
 			   MAP_ANONYMOUS | MAP_SHARED | MAP_NORESERVE,
@@ -221,18 +224,28 @@ namespace Realm {
     pool->pool_start = reinterpret_cast<uintptr_t>(mmap_base);
     pool->pool_pos = pool->pool_start + sizeof(PoolDescriptor);
     pool->pool_end = pool->pool_start + pool_size;
+#endif
   }
 
   BumpAllocator::~BumpAllocator(void)
   {
+#if 0
     int ret = munmap(pool, pool_size);
     NONMALLOC_ASSERT(ret == 0);
+#endif
+  }
+
+  void BumpAllocator::set_pool_location(void *base, size_t bytes)
+  {
+    pool.pool_start = reinterpret_cast<uintptr_t>(base);
+    pool.pool_pos = pool.pool_start;
+    pool.pool_end = pool.pool_start + bytes;
   }
 
   void *BumpAllocator::malloc(size_t size, size_t alignment)
   {
     while(true) {
-      uintptr_t cur_pos = __sync_fetch_and_add(&pool->pool_pos, 0);
+      uintptr_t cur_pos = __sync_fetch_and_add(&pool.pool_pos, 0);
 
       uintptr_t base = cur_pos + sizeof(size_t);
       if(alignment > 1) {
@@ -250,10 +263,10 @@ namespace Realm {
 	if(leftover > 0)
 	  new_pos += sizeof(size_t) - leftover;
       }
-      NONMALLOC_ASSERT(new_pos <= pool->pool_end);
+      NONMALLOC_ASSERT(new_pos <= pool.pool_end);
 
       // compare-and-swap to actually claim memory - loop around on failure
-      if(__sync_bool_compare_and_swap(&pool->pool_pos, cur_pos, new_pos))
+      if(__sync_bool_compare_and_swap(&pool.pool_pos, cur_pos, new_pos))
 	return reinterpret_cast<void *>(base);
     }
   }
@@ -463,8 +476,14 @@ namespace Realm {
     size_t min_size = 1;
     size_t max_size = MINSIZE;
     for(size_t i = 0; i < BUCKETS; i++) {
-      printf("%5zd - %5zd B: ",
-	     min_size, max_size);
+      if(buckets[i].total_allocs == 0)
+	continue;
+
+      if(i == (BUCKETS - 1))
+	printf("%5zd +       B: ", min_size);
+      else
+	printf("%5zd - %5zd B: ", min_size, max_size);
+
       buckets[i].report();
       min_size = max_size + 1;
       max_size += (max_size * SCALE) >> 10;
@@ -582,6 +601,9 @@ namespace Realm {
     virtual ~DefaultAllocator(void);
 
     T *alloc;
+    ShareableMemory mapping;
+    typedef UsageTrackingAllocator<BumpAllocator, 16> BUMPALLOC;
+    BUMPALLOC *bump;
   };
 
   template <typename T>
@@ -593,12 +615,24 @@ namespace Realm {
     static_ranges.default_allocator = alloc;
     //Allocator::register_memory_range(alloc, 0, size_t(-1));
     ranges = &static_ranges;
+
+    mapping.size = 1 << 30;
+    bool ok = mapping.map();
+    assert(ok);
+    bump = new(mapping.base) BUMPALLOC;
+    // subtract space for the metadata
+    bump->set_pool_location(bump + 1, (1 << 30) - sizeof(BUMPALLOC));
+    Allocator::register_memory_range(bump, mapping.base, 1 << 30);
+    ThreadLocal::my_allocator = bump;
   }
 
   template <typename T>
   DefaultAllocator<T>::~DefaultAllocator(void)
   {
+    printf("libc allocator:\n");
     alloc->report();
+    printf("bump allocator:\n");
+    bump->report();
     //ThreadLocal::my_allocator = 0;
   }
 

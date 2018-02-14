@@ -157,7 +157,11 @@ namespace Realm {
             Processor p = runtime->next_local_processor_id();
             ProcessorImpl *pi = new LocalCPUProcessor(p, runtime->core_reservation_set(),
 						      cfg_stack_size_in_mb << 20,
-						      Config::force_kernel_threads);
+						      Config::force_kernel_threads
+#ifdef REALM_USE_SUBPROCESSES
+						      , Config::isolate_all_processors
+#endif
+						      );
             runtime->add_processor(pi);
           }
         }      

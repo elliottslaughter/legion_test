@@ -52,14 +52,19 @@ namespace Realm {
     int numa_node;
     int num_threads;
     ThreadPool *pool;
-    std::vector<CoreReservation *> core_rsrvs;
+    std::vector<CoreReservation *> slave_rsrvs;
   };
 
   LocalOpenMPProcessor::LocalOpenMPProcessor(Processor _me, int _numa_node,
 					     int _num_threads,
 					     bool _fake_cpukind,
 					     CoreReservationSet& crs,
-					     size_t _stack_size)
+					     size_t _stack_size,
+					     bool _force_kthreads
+#ifdef REALM_USE_SUBPROCESSES
+					     , bool _isolate_proc
+#endif
+					     )
     : LocalTaskProcessor(_me, (_fake_cpukind ? Processor::LOC_PROC :
 			                       Processor::OMP_PROC))
     , numa_node(_numa_node)
@@ -76,20 +81,26 @@ namespace Realm {
       params.set_fpu_usage(params.CORE_USAGE_EXCLUSIVE);
       params.set_ldst_usage(params.CORE_USAGE_SHARED);
       params.set_max_stack_size(_stack_size);
+#ifdef REALM_USE_SUBPROCESSES
+      params.set_use_subprocess(_isolate_proc);
+#endif
 
       std::string name = stringbuilder() << "OMP" << numa_node << " proc " << _me << " (master)";
 
-      CoreReservation *rsrv = new CoreReservation(name, crs, params);
-      core_rsrvs.push_back(rsrv);
+      core_rsrv = new CoreReservation(name, crs, params);
 
 #ifdef REALM_USE_USER_THREADS
-      UserThreadTaskScheduler *sched = new UserThreadTaskScheduler(me, *rsrv);
-      // no config settings we want to tweak yet
-#else
-      KernelThreadTaskScheduler *sched = new KernelThreadTaskScheduler(me, *rsrv);
-      sched->cfg_max_idle_workers = 3; // keep a few idle threads around
+      if(!_force_kthreads) {
+	UserThreadTaskScheduler *sched = new UserThreadTaskScheduler(me, *core_rsrv);
+	// no config settings we want to tweak yet
+	set_scheduler(sched);
+      } else
 #endif
-      set_scheduler(sched);
+      {
+	KernelThreadTaskScheduler *sched = new KernelThreadTaskScheduler(me, *core_rsrv);
+	sched->cfg_max_idle_workers = 3; // keep a few idle threads around
+	set_scheduler(sched);
+      }
     }
 
     // slaves run kernel threads because they never context switch
@@ -105,7 +116,7 @@ namespace Realm {
       std::string name = stringbuilder() << "OMP" << numa_node << " proc " << _me << " (slave " << i << ")";
 
       CoreReservation *rsrv = new CoreReservation(name, crs, params);
-      core_rsrvs.push_back(rsrv);
+      slave_rsrvs.push_back(rsrv);
 
       // worker threads will be tracked by the threadpool
       ThreadLaunchParameters tlp;
@@ -117,11 +128,11 @@ namespace Realm {
 
   LocalOpenMPProcessor::~LocalOpenMPProcessor(void)
   {
-    for(std::vector<CoreReservation *>::const_iterator it = core_rsrvs.begin();
-	it != core_rsrvs.end();
+    for(std::vector<CoreReservation *>::const_iterator it = slave_rsrvs.begin();
+	it != slave_rsrvs.end();
 	++it)
       delete *it;
-    core_rsrvs.clear();
+    slave_rsrvs.clear();
   }
 
   void LocalOpenMPProcessor::shutdown(void)
@@ -253,7 +264,12 @@ namespace Realm {
 						       cfg_num_threads_per_cpu,
 						       cfg_fake_cpukind,
 						       runtime->core_reservation_set(),
-						       cfg_stack_size_in_mb << 20);
+						       cfg_stack_size_in_mb << 20,
+						       Config::force_kernel_threads
+#ifdef REALM_USE_SUBPROCESSES
+						       , Config::isolate_all_processors
+#endif
+						       );
 	  runtime->add_processor(pi);
 
 	  // FIXME: once the stuff in runtime_impl.cc is removed, remove

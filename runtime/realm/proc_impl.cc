@@ -805,6 +805,7 @@ namespace Realm {
     : ProcessorImpl(_me, _kind, _num_cores)
     , sched(0)
     , ready_task_count(stringbuilder() << "realm/proc " << me << "/ready tasks")
+    , core_rsrv(0)
   {
     task_queue.set_gauge(&ready_task_count);
   }
@@ -812,6 +813,7 @@ namespace Realm {
   LocalTaskProcessor::~LocalTaskProcessor(void)
   {
     delete sched;
+    delete core_rsrv;
   }
 
   void LocalTaskProcessor::set_scheduler(ThreadedTaskScheduler *_sched)
@@ -895,6 +897,14 @@ namespace Realm {
 
     // if we don't have a function pointer implementation, see if we can make one
     if(!fpi) {
+#ifdef REALM_USE_SUBPROCESSES
+      // DSO->fnptr conversion for an isolated processor must happen in
+      //  the child process!
+      if(core_rsrv->params.use_subprocess) {
+	log_taskreg.fatal() << "cannot currently register DSO references in subprocesses!";
+	assert(0);
+      }
+#endif
       const std::vector<CodeTranslator *>& translators = get_runtime()->get_code_translators();
       for(std::vector<CodeTranslator *>::const_iterator it = translators.begin();
 	  it != translators.end();
@@ -971,8 +981,14 @@ namespace Realm {
   // class LocalCPUProcessor
   //
 
-  LocalCPUProcessor::LocalCPUProcessor(Processor _me, CoreReservationSet& crs,
-				       size_t _stack_size, bool _force_kthreads)
+  LocalCPUProcessor::LocalCPUProcessor(Processor _me,
+				       CoreReservationSet& crs,
+				       size_t _stack_size,
+				       bool _force_kthreads
+#ifdef REALM_USE_SUBPROCESSES
+				       , bool _isolate_proc
+#endif
+				       )
     : LocalTaskProcessor(_me, Processor::LOC_PROC)
   {
     CoreReservationParameters params;
@@ -981,7 +997,9 @@ namespace Realm {
     params.set_fpu_usage(params.CORE_USAGE_EXCLUSIVE);
     params.set_ldst_usage(params.CORE_USAGE_SHARED);
     params.set_max_stack_size(_stack_size);
-    //params.set_use_subprocess(true);
+#ifdef REALM_USE_SUBPROCESSES
+    params.set_use_subprocess(_isolate_proc);
+#endif
 
     std::string name = stringbuilder() << "CPU proc " << _me;
 
@@ -1002,9 +1020,7 @@ namespace Realm {
   }
 
   LocalCPUProcessor::~LocalCPUProcessor(void)
-  {
-    delete core_rsrv;
-  }
+  {}
 
 
   ////////////////////////////////////////////////////////////////////////
@@ -1012,8 +1028,14 @@ namespace Realm {
   // class LocalUtilityProcessor
   //
 
-  LocalUtilityProcessor::LocalUtilityProcessor(Processor _me, CoreReservationSet& crs,
-					       size_t _stack_size, bool _force_kthreads)
+  LocalUtilityProcessor::LocalUtilityProcessor(Processor _me,
+					       CoreReservationSet& crs,
+					       size_t _stack_size,
+					       bool _force_kthreads
+#ifdef REALM_USE_SUBPROCESSES
+					       , bool _isolate_proc
+#endif
+					       )
     : LocalTaskProcessor(_me, Processor::UTIL_PROC)
   {
     CoreReservationParameters params;
@@ -1022,6 +1044,9 @@ namespace Realm {
     params.set_fpu_usage(params.CORE_USAGE_MINIMAL);
     params.set_ldst_usage(params.CORE_USAGE_SHARED);
     params.set_max_stack_size(_stack_size);
+#ifdef REALM_USE_SUBPROCESSES
+    params.set_use_subprocess(_isolate_proc);
+#endif
 
     std::string name = stringbuilder() << "utility proc " << _me;
 
@@ -1042,9 +1067,7 @@ namespace Realm {
   }
 
   LocalUtilityProcessor::~LocalUtilityProcessor(void)
-  {
-    delete core_rsrv;
-  }
+  {}
 
 
   ////////////////////////////////////////////////////////////////////////
@@ -1052,8 +1075,14 @@ namespace Realm {
   // class LocalIOProcessor
   //
 
-  LocalIOProcessor::LocalIOProcessor(Processor _me, CoreReservationSet& crs,
-				     size_t _stack_size, int _concurrent_io_threads)
+  LocalIOProcessor::LocalIOProcessor(Processor _me,
+				     CoreReservationSet& crs,
+				     size_t _stack_size,
+				     int _concurrent_io_threads
+#ifdef REALM_USE_SUBPROCESSES
+				     , bool _isolate_proc
+#endif
+				     )
     : LocalTaskProcessor(_me, Processor::IO_PROC)
   {
     CoreReservationParameters params;
@@ -1061,6 +1090,9 @@ namespace Realm {
     params.set_fpu_usage(params.CORE_USAGE_MINIMAL);
     params.set_ldst_usage(params.CORE_USAGE_SHARED);
     params.set_max_stack_size(_stack_size);
+#ifdef REALM_USE_SUBPROCESSES
+    params.set_use_subprocess(_isolate_proc);
+#endif
 
     std::string name = stringbuilder() << "IO proc " << _me;
 
@@ -1076,9 +1108,7 @@ namespace Realm {
   }
 
   LocalIOProcessor::~LocalIOProcessor(void)
-  {
-    delete core_rsrv;
-  }
+  {}
 
 
   ////////////////////////////////////////////////////////////////////////

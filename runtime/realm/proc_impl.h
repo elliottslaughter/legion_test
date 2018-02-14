@@ -112,6 +112,8 @@ namespace Realm {
 
       virtual void execute_task(Processor::TaskFuncID func_id,
 				const ByteArrayRef& task_args);
+
+      CoreReservation *core_rsrv;
     };
 
     // three simple subclasses for:
@@ -128,28 +130,35 @@ namespace Realm {
     class LocalCPUProcessor : public LocalTaskProcessor {
     public:
       LocalCPUProcessor(Processor _me, CoreReservationSet& crs,
-			size_t _stack_size, bool _force_kthreads);
+			size_t _stack_size,
+			bool _force_kthreads
+#ifdef REALM_USE_SUBPROCESSES
+			, bool _isolate_proc
+#endif
+			);
       virtual ~LocalCPUProcessor(void);
-    protected:
-      CoreReservation *core_rsrv;
     };
 
     class LocalUtilityProcessor : public LocalTaskProcessor {
     public:
       LocalUtilityProcessor(Processor _me, CoreReservationSet& crs,
-			    size_t _stack_size, bool _force_kthreads);
+			    size_t _stack_size, bool _force_kthreads
+#ifdef REALM_USE_SUBPROCESSES
+			    , bool _isolate_proc
+#endif
+			    );
       virtual ~LocalUtilityProcessor(void);
-    protected:
-      CoreReservation *core_rsrv;
     };
 
     class LocalIOProcessor : public LocalTaskProcessor {
     public:
-      LocalIOProcessor(Processor _me, CoreReservationSet& crs, size_t _stack_size,
-		       int _concurrent_io_threads);
+      LocalIOProcessor(Processor _me, CoreReservationSet& crs,
+		       size_t _stack_size, int _concurrent_io_threads
+#ifdef REALM_USE_SUBPROCESSES
+		       , bool _isolate_proc
+#endif
+		       );
       virtual ~LocalIOProcessor(void);
-    protected:
-      CoreReservation *core_rsrv;
     };
 
     class RemoteProcessor : public ProcessorImpl {
