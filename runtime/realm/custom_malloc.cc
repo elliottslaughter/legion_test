@@ -522,9 +522,11 @@ namespace Realm {
     atomic_max(&max_bytes, new_bytes);
     __sync_fetch_and_add(&total_bytes, bytes);
 
-    __sync_fetch_and_add(&sum_alloc_time, nanoseconds);
-    __sync_fetch_and_add(&sum_alloc_time2, nanoseconds * nanoseconds);
-    atomic_max(&max_alloc_time, nanoseconds);
+    if(nanoseconds > 0) {
+      __sync_fetch_and_add(&sum_alloc_time, nanoseconds);
+      __sync_fetch_and_add(&sum_alloc_time2, nanoseconds * nanoseconds);
+      atomic_max(&max_alloc_time, nanoseconds);
+    }
   }
 
   template <typename T, size_t BUCKETS, size_t MINSIZE, size_t SCALE>
@@ -533,9 +535,11 @@ namespace Realm {
     __sync_fetch_and_sub(&cur_allocs, 1);
     __sync_fetch_and_sub(&cur_bytes, bytes);
 
-    __sync_fetch_and_add(&sum_free_time, nanoseconds);
-    __sync_fetch_and_add(&sum_free_time2, nanoseconds * nanoseconds);
-    atomic_max(&max_free_time, nanoseconds);
+    if(nanoseconds > 0) {
+      __sync_fetch_and_add(&sum_free_time, nanoseconds);
+      __sync_fetch_and_add(&sum_free_time2, nanoseconds * nanoseconds);
+      atomic_max(&max_free_time, nanoseconds);
+    }
   }
 
   template <typename T, size_t BUCKETS, size_t MINSIZE, size_t SCALE>
@@ -609,10 +613,10 @@ namespace Realm {
   template <typename T>
   DefaultAllocator<T>::DefaultAllocator(void)
   {
-    alloc = new T;
-    ThreadLocal::my_allocator = alloc;
+    alloc = 0;//new T;
+    //ThreadLocal::my_allocator = alloc;
     // HACK: claim all of memory
-    static_ranges.default_allocator = alloc;
+    //static_ranges.default_allocator = alloc;
     //Allocator::register_memory_range(alloc, 0, size_t(-1));
     ranges = &static_ranges;
 
@@ -629,8 +633,8 @@ namespace Realm {
   template <typename T>
   DefaultAllocator<T>::~DefaultAllocator(void)
   {
-    printf("libc allocator:\n");
-    alloc->report();
+    //printf("libc allocator:\n");
+    //alloc->report();
     printf("bump allocator:\n");
     bump->report();
     //ThreadLocal::my_allocator = 0;
