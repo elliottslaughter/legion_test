@@ -605,6 +605,9 @@ namespace Realm {
 	alloc->restrict_cpus = false;
 	CPU_ZERO(&alloc->allowed_cpus);
 #endif
+#ifdef REALM_USE_SUBPROCESSES
+	alloc->subprocess = 0;
+#endif
 	rsrv->allocation = alloc;
 	allocations[rsrv] = alloc;
       }
