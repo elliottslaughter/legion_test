@@ -144,7 +144,7 @@
 // target machine bytes.  For most 64-bit 
 // systems this should be 16 bytes.
 #ifndef LEGION_MAX_ALIGNMENT
-#define LEGION_MAX_ALIGNMENT            16
+#define LEGION_MAX_ALIGNMENT            8
 #endif
 
 // Give an ideal upper bound on the maximum
