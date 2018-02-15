@@ -68,6 +68,7 @@ list(APPEND REALM_SRC
   realm/tasks.h             realm/tasks.cc
   realm/threads.h           realm/threads.cc
   realm/threads.inl
+  realm/custom_malloc.h     realm/custom_malloc.cc
 )
 
 if(Legion_USE_CUDA)
