@@ -19,6 +19,9 @@
 #include "realm/timers.h"
 #include "realm/numa/numasysif.h"
 
+#include "realm/faults.h"
+#include <set>
+
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
@@ -244,6 +247,10 @@ namespace Realm {
 
   void *BumpAllocator::malloc(size_t size, size_t alignment)
   {
+    // if alignment is not specified, anything larger than 8B needs 16B
+    //  alignment in 64-bit systems
+    if((alignment == 0) && (size > 8)) alignment = 16;
+
     while(true) {
       uintptr_t cur_pos = __sync_fetch_and_add(&pool.pool_pos, 0);
 
@@ -264,6 +271,8 @@ namespace Realm {
 	  new_pos += sizeof(size_t) - leftover;
       }
       NONMALLOC_ASSERT(new_pos <= pool.pool_end);
+
+      NONMALLOC_ASSERT((alignment <= 1) || ((base % alignment) == 0));
 
       // compare-and-swap to actually claim memory - loop around on failure
       if(__sync_bool_compare_and_swap(&pool.pool_pos, cur_pos, new_pos))
@@ -347,6 +356,8 @@ namespace Realm {
 
     BucketInfo buckets[BUCKETS], global_stats;
     long long time_offset;
+    GASNetHSL mutex;
+    std::set<intptr_t> backtraces_seen;
   };
 
   template <typename T, size_t BUCKETS, size_t MINSIZE, size_t SCALE>
@@ -368,6 +379,17 @@ namespace Realm {
   template <typename T, size_t BUCKETS, size_t MINSIZE, size_t SCALE>
   void *UsageTrackingAllocator<T,BUCKETS,MINSIZE,SCALE>::malloc(size_t size, size_t alignment)
   {
+    if(0&&(size <= 8 || size > 32768)) {
+      AutoHSLLock al(mutex);
+      Backtrace bt;
+      bt.capture_backtrace();
+      intptr_t h = bt.hash();
+      if(backtraces_seen.count(h) == 0) {
+	backtraces_seen.insert(h);
+	bt.lookup_symbols();
+	std::cout << "malloc of size=" << size << " from " << bt;
+      }
+    }
     // we need to squirrel away some space to keep the size info
     size_t pad = sizeof(AllocInfo);
     if((alignment > 0) && ((pad % alignment) != 0))
