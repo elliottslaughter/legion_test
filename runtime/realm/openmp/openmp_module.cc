@@ -40,7 +40,12 @@ namespace Realm {
   public:
     LocalOpenMPProcessor(Processor _me, int _numa_node,
 			 int _num_threads, bool _fake_cpukind,
-			 CoreReservationSet& crs, size_t _stack_size);
+			 CoreReservationSet& crs, size_t _stack_size,
+			 bool _force_kthreads
+#ifdef REALM_USE_SUBPROCESSES
+			 , bool _isolate_proc
+#endif
+			 );
     virtual ~LocalOpenMPProcessor(void);
 
     virtual void shutdown(void);
