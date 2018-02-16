@@ -95,6 +95,8 @@ namespace Realm {
     void discard_data(size_t offset, size_t bytes);
   };
 
+  void create_shared_bump_allocator(size_t bytes);
+
 };
 
 #endif

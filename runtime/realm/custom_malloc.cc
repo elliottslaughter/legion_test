@@ -641,13 +641,37 @@ namespace Realm {
   }
 
   //DefaultAllocator<LibcMalloc> libc_allocator;
-  DefaultAllocator<UsageTrackingAllocator<LibcMalloc, 16> > libc_allocator;
+  UsageTrackingAllocator<LibcMalloc, 16> libc_allocator;
 
   /*static*/ Allocator *Allocator::libc_allocator(void)
   {
-    return Realm::libc_allocator.alloc;
+    return &Realm::libc_allocator;
   }
 
+  ShareableMemory shared_bump_mapping;
+  typedef UsageTrackingAllocator<BumpAllocator, 16> BUMPALLOC;
+  static BUMPALLOC *bump = 0;
+
+  static void report_bump_stats(void)
+  {
+    bump->report();
+  }
+
+  void create_shared_bump_allocator(size_t bytes)
+  {
+    printf("creating shared allocator for isolated processors...\n");
+    ranges = &static_ranges;
+
+    shared_bump_mapping.size = 1 << 30;
+    bool ok = shared_bump_mapping.map();
+    assert(ok);
+    bump = new(shared_bump_mapping.base) BUMPALLOC;
+    // subtract space for the metadata
+    bump->set_pool_location(bump + 1, (1 << 30) - sizeof(BUMPALLOC));
+    Allocator::register_memory_range(bump, shared_bump_mapping.base, 1 << 30);
+    ThreadLocal::my_allocator = bump;
+    atexit(report_bump_stats);
+  }
 
   ////////////////////////////////////////////////////////////////////////
   //

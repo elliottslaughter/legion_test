@@ -292,6 +292,15 @@ namespace Realm {
 	return false;
       }
 
+#ifdef REALM_USE_SUBPROCESSES
+      // if we need a shareable heap, set that up before anything else happens
+      // unfortunately, this is too early to look at command line parameters
+      if(getenv("REALM_SHARED_ALLOC")) {
+	size_t shared_alloc_size_in_mb = 1024;
+	create_shared_bump_allocator(shared_alloc_size_in_mb << 20);
+      }
+#endif
+
       impl = new RuntimeImpl;
       runtime_singleton = ((RuntimeImpl *)impl);
       return ((RuntimeImpl *)impl)->init(argc, argv);
