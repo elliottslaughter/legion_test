@@ -245,8 +245,11 @@ namespace Realm {
     pool.pool_end = pool.pool_start + bytes;
   }
 
+  //GASNetHSL mmutex;
+
   void *BumpAllocator::malloc(size_t size, size_t alignment)
   {
+    //AutoHSLLock al(mmutex);
     // if alignment is not specified, anything larger than 8B needs 16B
     //  alignment in 64-bit systems
     if((alignment == 0) && (size > 8)) alignment = 16;
@@ -376,6 +379,12 @@ namespace Realm {
     //printf("offset = %lld\n", time_offset);
   }
 
+#ifdef LOG_ALLOCS
+  size_t ptrcount = 0;
+  struct PtrInfo { void *base; size_t size; };
+  PtrInfo ptrinfos[1<<20];
+#endif
+
   template <typename T, size_t BUCKETS, size_t MINSIZE, size_t SCALE>
   void *UsageTrackingAllocator<T,BUCKETS,MINSIZE,SCALE>::malloc(size_t size, size_t alignment)
   {
@@ -407,6 +416,14 @@ namespace Realm {
     info->size = size;
     info->pad = pad;
     //printf("alloc ptr=%p size=%zd pad=%zd\n", ptr, size, pad);
+
+#ifdef LOG_ALLOCS
+    {
+      size_t i = __sync_fetch_and_add(&ptrcount, 1);
+      ptrinfos[i].base = ptr;
+      ptrinfos[i].size = size;
+    }
+#endif
 
     unsigned idx = bucket_index(size);
     buckets[idx].record_alloc(size, elapsed);
@@ -671,28 +688,56 @@ namespace Realm {
   }
 
   ShareableMemory shared_bump_mapping;
+#define USE_BUMP
+#define USE_TRACK
+#ifdef USE_BUMP
+#ifdef USE_TRACK
   typedef UsageTrackingAllocator<BumpAllocator, 16> BUMPALLOC;
+#else
+  typedef BumpAllocator BUMPALLOC;
+#endif
+#else
+#ifdef USE_TRACK
+  typedef UsageTrackingAllocator<LibcMalloc, 16> BUMPALLOC;
+#else
+  typedef LibcMalloc BUMPALLOC;
+#endif
+#endif
   static BUMPALLOC *bump = 0;
 
+#ifdef USE_TRACK
   static void report_bump_stats(void)
   {
     bump->report();
   }
+#endif
 
   void create_shared_bump_allocator(size_t bytes)
   {
     printf("creating shared allocator for isolated processors...\n");
     ranges = &static_ranges;
 
+#ifdef USE_BUMP
     shared_bump_mapping.size = 1 << 30;
+#if 0
     bool ok = shared_bump_mapping.map();
     assert(ok);
+#else
+    shared_bump_mapping.base = __libc_memalign(4096, shared_bump_mapping.size);
+    assert(shared_bump_mapping.base != 0);
+#endif
     bump = new(shared_bump_mapping.base) BUMPALLOC;
     // subtract space for the metadata
     bump->set_pool_location(bump + 1, (1 << 30) - sizeof(BUMPALLOC));
     Allocator::register_memory_range(bump, shared_bump_mapping.base, 1 << 30);
+#else
+    bump = new BUMPALLOC;
+    static_ranges.default_allocator = bump;
+#endif
     ThreadLocal::my_allocator = bump;
+#ifdef USE_TRACK
     atexit(report_bump_stats);
+#endif
   }
 
   ////////////////////////////////////////////////////////////////////////
