@@ -160,27 +160,38 @@ namespace Realm {
       assert(false);
     }
 
-    api = new PythonAPI(handle);
+    // python stuff should use its own allocator
+    allocator = Allocator::libc_allocator();
 
-    (api->Py_InitializeEx)(0 /*!initsigs*/);
-    (api->PyEval_InitThreads)();
-    //(api->Py_Finalize)();
+    {
+      ScopedAllocatorPush sap(allocator);
 
-    //PyThreadState *state;
-    //state = (api->PyEval_SaveThread)();
-    //(api->PyEval_RestoreThread)(state);
+      api = new PythonAPI(handle);
 
-    //(api->PyRun_SimpleString)("print 'hello Python world!'");
+      (api->Py_InitializeEx)(0 /*!initsigs*/);
+      (api->PyEval_InitThreads)();
+      //(api->Py_Finalize)();
 
-    //PythonSourceImplementation psi("taskreg_helper", "task1");
-    //find_or_import_function(&psi);
+      //PyThreadState *state;
+      //state = (api->PyEval_SaveThread)();
+      //(api->PyEval_RestoreThread)(state);
+      
+      //(api->PyRun_SimpleString)("print 'hello Python world!'");
+
+      //PythonSourceImplementation psi("taskreg_helper", "task1");
+      //find_or_import_function(&psi);
+    }
   }
 
   PythonInterpreter::~PythonInterpreter()
   {
-    (api->Py_Finalize)();
+    {
+      ScopedAllocatorPush sap(allocator);
 
-    delete api;
+      (api->Py_Finalize)();
+
+      delete api;
+    }
 
     if (dlclose(handle)) {
       const char *error = dlerror();
@@ -232,6 +243,8 @@ namespace Realm {
 
   void PythonInterpreter::import_module(const std::string& module_name)
   {
+    ScopedAllocatorPush sap(allocator);
+
     log_py.debug() << "attempting to import module: " << module_name;
     PyObject *module = (api->PyImport_ImportModule)(module_name.c_str());
     if (!module) {
@@ -244,6 +257,8 @@ namespace Realm {
 
   void PythonInterpreter::run_string(const std::string& script_text)
   {
+    ScopedAllocatorPush sap(allocator);
+
     // from Python.h
     const int Py_file_input = 257;
 
@@ -285,6 +300,70 @@ namespace Realm {
     work_counter.increment_counter();
   }
 
+  static void check_python_freelist(void)
+  {
+#ifdef DO_FREELIST_CHECKS
+    void *s1 = dlsym(RTLD_DEFAULT, "PyInt_FromLong");
+    assert(s1 != 0);
+    void *s2 = dlsym(RTLD_DEFAULT, "PyInt_Type");
+    assert(s2 != 0);
+    static const uintptr_t freelist_ptr = reinterpret_cast<uintptr_t>(s1) + 0x3ef440;
+    static const uintptr_t blocklist_ptr = reinterpret_cast<uintptr_t>(s1) + 0x3eebf0;
+    static const uintptr_t inttype_ptr = reinterpret_cast<uintptr_t>(s2);
+    uintptr_t nextfree = *reinterpret_cast<uintptr_t *>(freelist_ptr);
+    size_t freecount = 0;
+    std::set<uintptr_t> free_ints;
+    size_t errors =0 ;
+    while(nextfree != 0) {
+      const uintptr_t *obj = reinterpret_cast<uintptr_t *>(nextfree);
+      if((freecount++ < 10) || ((obj[2] & ~0xFFFFFFFFLL) == 0x7FFF00000000LL))
+	printf("free: (%zd) %lx -> (%lx, %lx, %lx)\n", freecount, nextfree, obj[0], obj[1], obj[2]);
+      free_ints.insert(nextfree);
+      uintptr_t rc = obj[0];
+      if(rc != 0) {
+	printf("HELP!  non-zero refcount in free list: %lx -> (%lx, %lx, %lx)\n", nextfree, obj[0], obj[1], obj[2]);
+	if(errors++ > 10) assert(0);
+      }
+      nextfree = obj[1];
+    }
+
+    uintptr_t blockptr = *reinterpret_cast<uintptr_t *>(blocklist_ptr);
+    while(blockptr != 0) {
+      const uintptr_t *block = reinterpret_cast<uintptr_t *>(blockptr);
+      for(int i = 0; i < 41; i++) {
+	uintptr_t rc = block[3 * i + 1];
+	uintptr_t tp = block[3 * i + 2];
+	if((rc == 0) ^ (tp != inttype_ptr)) {
+	  printf("HELP!  inconsistent int object: (%lx,%d) = %lx -> (%lx, %lx, %lx)\n", blockptr, i, blockptr+(3*i + 1)*sizeof(uintptr_t), block[3*i+1], block[3*i+2], block[3*i+3]);
+	  printf("%zd %zd, %lx -> (%lx, %lx, %lx)\n",
+		 free_ints.count(blockptr+(3*i + 1)*sizeof(uintptr_t)),
+		 free_ints.count(blockptr+(3*i + 4)*sizeof(uintptr_t)),
+		 blockptr+(3*i + 4)*sizeof(uintptr_t),
+		 block[3*i+4], block[3*i+5], block[3*i+6]
+		 );
+	  if(errors++ > 10) assert(0);
+	}
+	if(rc == 0) {
+	  std::set<uintptr_t>::iterator it = free_ints.find(blockptr+(3*i + 1)*sizeof(uintptr_t));
+	  if(it == free_ints.end()) {
+	    printf("HELP!  unconnected int object: (%lx,%d) = %lx -> (%lx, %lx, %lx)\n", blockptr, i, blockptr+(3*i + 1)*sizeof(uintptr_t), block[3*i+1], block[3*i+2], block[3*i+3]);
+	    if(errors++ > 10) assert(0);
+	  } else {
+	    free_ints.erase(it);
+	  }
+	}
+      }
+      blockptr = block[0];
+    }
+    if(!free_ints.empty()) {
+      printf("%zd free ints not in list!\n", free_ints.size());
+      errors++;
+    }
+    if(errors > 0) assert(0);
+    fflush(stdout);
+#endif
+  }
+
   void PythonThreadTaskScheduler::python_scheduler_loop(void)
   {
     // hold scheduler lock for whole thing
@@ -297,7 +376,11 @@ namespace Realm {
     }
 
     // always create and remember our own python thread - does NOT require GIL
-    PyThreadState *pythread = (pyproc->interpreter->api->PyThreadState_New)(pyproc->master_thread->interp);
+    PyThreadState *pythread;
+    {
+      ScopedAllocatorPush sap(pyproc->interpreter->allocator);
+      pythread = (pyproc->interpreter->api->PyThreadState_New)(pyproc->master_thread->interp);
+    }
     log_py.debug() << "created python thread: " << pythread;
     
     assert(pythread != 0);
@@ -382,21 +465,25 @@ namespace Realm {
 	// release the lock while we run the task
 	lock.unlock();
 
-	// make our python thread state active, acquiring the GIL
-	assert((pyproc->interpreter->api->PyThreadState_Swap)(0) == 0);
-	log_py.debug() << "RestoreThread <- " << pythread;
-	(pyproc->interpreter->api->PyEval_RestoreThread)(pythread);
+	{
+	  ScopedAllocatorPush sap(pyproc->interpreter->allocator);
+
+	  // make our python thread state active, acquiring the GIL
+	  assert((pyproc->interpreter->api->PyThreadState_Swap)(0) == 0);
+	  log_py.debug() << "RestoreThread <- " << pythread;
+	  (pyproc->interpreter->api->PyEval_RestoreThread)(pythread);
 
 #ifndef NDEBUG
-	bool ok =
+	  bool ok =
 #endif
-	  execute_task(task);
-	assert(ok);  // no fault recovery yet
+	    execute_task(task);
+	  assert(ok);  // no fault recovery yet
 
-	// release the GIL
-	PyThreadState *saved = (pyproc->interpreter->api->PyEval_SaveThread)();
-	log_py.debug() << "SaveThread -> " << saved;
-	assert(saved == pythread);
+	  // release the GIL
+	  PyThreadState *saved = (pyproc->interpreter->api->PyEval_SaveThread)();
+	  log_py.debug() << "SaveThread -> " << saved;
+	  assert(saved == pythread);
+	}
 
 	lock.lock();
 
@@ -485,10 +572,16 @@ namespace Realm {
     return t;
   }
  
+  // cheating for now...
+  extern Allocator *realm_allocator;
+
   // called by a worker thread when it needs to wait for something (and we
   //   should release the GIL)
   void PythonThreadTaskScheduler::thread_blocking(Thread *thread)
   {
+    // the current allocator should be the interpreter's
+    assert(Allocator::get_current_allocator() == pyproc->interpreter->allocator);
+
     // if we got here through a cffi call, the GIL has already been released,
     //  so try to handle that case here - a call PyEval_SaveThread
     //  if the GIL is not held will assert-fail, and while a call to
@@ -505,8 +598,12 @@ namespace Realm {
       log_py.debug() << "SaveThread -> " << saved;
     } else
       log_py.info() << "python worker sleeping - GIL already released";
-    
-    KernelThreadTaskScheduler::thread_blocking(thread);
+
+    // switch back to the realm allocator while we sleep
+    {
+      ScopedAllocatorPush sap(realm_allocator);
+      KernelThreadTaskScheduler::thread_blocking(thread);
+    }
 
     if(saved) {
       log_py.info() << "python worker awake - acquiring GIL";
@@ -526,21 +623,25 @@ namespace Realm {
 
     log_py.debug() << "destroying python thread: " << pythread;
     
-    // our thread should not be active
-    assert((pyproc->interpreter->api->PyThreadState_Swap)(0) == 0);
+    {
+      ScopedAllocatorPush sap(pyproc->interpreter->allocator);
 
-    // switch to the master thread, retaining the GIL
-    log_py.debug() << "RestoreThread <- " << pyproc->master_thread;
-    (pyproc->interpreter->api->PyEval_RestoreThread)(pyproc->master_thread);
+      // our thread should not be active
+      assert((pyproc->interpreter->api->PyThreadState_Swap)(0) == 0);
 
-    // clear and delete the worker thread
-    (pyproc->interpreter->api->PyThreadState_Clear)(pythread);
-    (pyproc->interpreter->api->PyThreadState_Delete)(pythread);
+      // switch to the master thread, retaining the GIL
+      log_py.debug() << "RestoreThread <- " << pyproc->master_thread;
+      (pyproc->interpreter->api->PyEval_RestoreThread)(pyproc->master_thread);
 
-    // release the GIL
-    PyThreadState *saved = (pyproc->interpreter->api->PyEval_SaveThread)();
-    log_py.debug() << "SaveThread -> " << saved;
-    assert(saved == pyproc->master_thread);
+      // clear and delete the worker thread
+      (pyproc->interpreter->api->PyThreadState_Clear)(pythread);
+      (pyproc->interpreter->api->PyThreadState_Delete)(pythread);
+      
+      // release the GIL
+      PyThreadState *saved = (pyproc->interpreter->api->PyEval_SaveThread)();
+      log_py.debug() << "SaveThread -> " << saved;
+      assert(saved == pyproc->master_thread);
+    }
 
     // TODO: tear down interpreter if last thread
     if(shutdown_flag && pythreads.empty())
@@ -606,19 +707,31 @@ namespace Realm {
     interpreter = new PythonInterpreter;
     master_thread = (interpreter->api->PyThreadState_Get)();
 
+    check_python_freelist();
+
     // always need the python threading module
     interpreter->import_module("threading");
     
+    check_python_freelist();
+
+    interpreter->import_module("legion");
+    
+    check_python_freelist();
+
     // perform requested initialization
     for(std::vector<std::string>::const_iterator it = import_modules.begin();
 	it != import_modules.end();
 	++it)
       interpreter->import_module(*it);
 
+    check_python_freelist();
+
     for(std::vector<std::string>::const_iterator it = init_scripts.begin();
 	it != init_scripts.end();
 	++it)
       interpreter->run_string(*it);
+
+    check_python_freelist();
 
     // default state is GIL _released_
     PyThreadState *saved = (interpreter->api->PyEval_SaveThread)();
@@ -630,23 +743,30 @@ namespace Realm {
   {
     assert(interpreter != 0);
 
-    // take GIL with master thread
-    assert((interpreter->api->PyThreadState_Swap)(0) == 0);
-    log_py.debug() << "RestoreThread <- " << master_thread;
-    (interpreter->api->PyEval_RestoreThread)(master_thread);
+    // check the python integer freelist
+    check_python_freelist();
 
-    // during shutdown, the threading module tries to remove the Thread object
-    //  associated with this kernel thread - if that doesn't exist (because we're
-    //  shutting down from a different thread that we initialized the interpreter
-    //  _and_ nobody called threading.current_thread() from this kernel thread),
-    //  we'll get a KeyError in threading.py
-    // resolve this by calling threading.current_thread() here, using __import__
-    //  to deal with the case where 'import threading' never got called
-    (interpreter->api->PyRun_SimpleString)("__import__('threading').current_thread()");
+    {
+      ScopedAllocatorPush sap(interpreter->allocator);
 
-    delete interpreter;
-    interpreter = 0;
-    master_thread = 0;
+      // take GIL with master thread
+      assert((interpreter->api->PyThreadState_Swap)(0) == 0);
+      log_py.debug() << "RestoreThread <- " << master_thread;
+      (interpreter->api->PyEval_RestoreThread)(master_thread);
+
+      // during shutdown, the threading module tries to remove the Thread object
+      //  associated with this kernel thread - if that doesn't exist (because we're
+      //  shutting down from a different thread that we initialized the interpreter
+      //  _and_ nobody called threading.current_thread() from this kernel thread),
+      //  we'll get a KeyError in threading.py
+      // resolve this by calling threading.current_thread() here, using __import__
+      //  to deal with the case where 'import threading' never got called
+      (interpreter->api->PyRun_SimpleString)("__import__('threading').current_thread()");
+
+      delete interpreter;
+      interpreter = 0;
+      master_thread = 0;
+    }
   }
   
   bool LocalPythonProcessor::perform_task_registration(LocalPythonProcessor::TaskRegistration *treg)
@@ -664,17 +784,26 @@ namespace Realm {
       assert(0);
     }
 
-    // perform import/compile on master thread
-    assert((interpreter->api->PyThreadState_Swap)(0) == 0);
-    log_py.debug() << "RestoreThread <- " << master_thread;
-    (interpreter->api->PyEval_RestoreThread)(master_thread);
-    
-    PyObject *fnptr = interpreter->find_or_import_function(psi);
-    assert(fnptr != 0);
+    check_python_freelist();
 
-    PyThreadState *saved = (interpreter->api->PyEval_SaveThread)();
-    log_py.debug() << "SaveThread -> " << saved;
-    assert(saved == master_thread);
+    PyObject *fnptr;
+    {
+      ScopedAllocatorPush sap(interpreter->allocator);
+
+      // perform import/compile on master thread
+      assert((interpreter->api->PyThreadState_Swap)(0) == 0);
+      log_py.debug() << "RestoreThread <- " << master_thread;
+      (interpreter->api->PyEval_RestoreThread)(master_thread);
+    
+      fnptr = interpreter->find_or_import_function(psi);
+      assert(fnptr != 0);
+
+      PyThreadState *saved = (interpreter->api->PyEval_SaveThread)();
+      log_py.debug() << "SaveThread -> " << saved;
+      assert(saved == master_thread);
+    }
+
+    check_python_freelist();
 
     log_py.info() << "task " << treg->func_id << " registered on " << me << ": " << *(treg->codedesc);
 
@@ -784,6 +913,7 @@ namespace Realm {
 
     log_py.debug() << "task " << func_id << " executing on " << me << ": " << ((void *)(tte.fnptr));
 
+    check_python_freelist();
     PyObject *arg1 = (interpreter->api->PyByteArray_FromStringAndSize)(
                                                    (const char *)task_args.base(),
 						   task_args.size());
@@ -816,6 +946,7 @@ namespace Realm {
       (interpreter->api->PyErr_PrintEx)(0);
       assert(0);
     }
+    check_python_freelist();
   }
 
   namespace Python {

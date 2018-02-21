@@ -633,9 +633,26 @@ namespace Realm {
   //
   // class DefaultAllocator
 
+  static Allocator *global_allocator = 0;
   namespace ThreadLocal {
-    /*__thread*/ Allocator *my_allocator = 0;
+    __thread Allocator *my_allocator = 0;
   };
+
+  // returns the allocator currently assigned to perform allocations for
+  //  the calling thread
+  /*static*/ Allocator *Allocator::get_current_allocator(void)
+  {
+    return (ThreadLocal::my_allocator ? 
+	      ThreadLocal::my_allocator :
+	      global_allocator);
+  }
+
+  // sets the allocator currently assigned to perform allocations for
+  //  the calling thread
+  /*static*/ void Allocator::set_current_allocator(Allocator *alloc)
+  {
+    ThreadLocal::my_allocator = alloc;
+  }
 
   template <typename T>
   class DefaultAllocator {
@@ -666,7 +683,7 @@ namespace Realm {
     // subtract space for the metadata
     bump->set_pool_location(bump + 1, (1 << 30) - sizeof(BUMPALLOC));
     Allocator::register_memory_range(bump, mapping.base, 1 << 30);
-    ThreadLocal::my_allocator = bump;
+    global_allocator = bump;
   }
 
   template <typename T>
@@ -674,17 +691,21 @@ namespace Realm {
   {
     //printf("libc allocator:\n");
     //alloc->report();
-    printf("bump allocator:\n");
-    bump->report();
+    if(getenv("REALM_REPORT_MALLOC_STATS")) {
+      printf("bump allocator:\n");
+      bump->report();
+    }
     //ThreadLocal::my_allocator = 0;
   }
 
   //DefaultAllocator<LibcMalloc> libc_allocator;
-  UsageTrackingAllocator<LibcMalloc, 16> libc_allocator;
 
   /*static*/ Allocator *Allocator::libc_allocator(void)
   {
-    return &Realm::libc_allocator;
+    //static UsageTrackingAllocator<LibcMalloc, 16> libc_allocator;
+    static LibcMalloc *libc_allocator = 0;
+    if(!libc_allocator) libc_allocator = new LibcMalloc;
+    return libc_allocator;
   }
 
   ShareableMemory shared_bump_mapping;
@@ -708,18 +729,24 @@ namespace Realm {
 #ifdef USE_TRACK
   static void report_bump_stats(void)
   {
-    bump->report();
+    if(getenv("REALM_REPORT_MALLOC_STATS")) {
+      bump->report();
+    }
   }
 #endif
+
+  /*extern*/ Allocator *realm_allocator = 0;
 
   void create_shared_bump_allocator(size_t bytes)
   {
     printf("creating shared allocator for isolated processors...\n");
+    static_ranges.default_allocator = Allocator::libc_allocator();
     ranges = &static_ranges;
 
 #ifdef USE_BUMP
     shared_bump_mapping.size = 1 << 30;
-#if 0
+#if 1
+    //shared_bump_mapping.pin_memory = true;
     bool ok = shared_bump_mapping.map();
     assert(ok);
 #else
@@ -727,6 +754,7 @@ namespace Realm {
     assert(shared_bump_mapping.base != 0);
 #endif
     bump = new(shared_bump_mapping.base) BUMPALLOC;
+    realm_allocator = bump;
     // subtract space for the metadata
     bump->set_pool_location(bump + 1, (1 << 30) - sizeof(BUMPALLOC));
     Allocator::register_memory_range(bump, shared_bump_mapping.base, 1 << 30);
@@ -734,7 +762,7 @@ namespace Realm {
     bump = new BUMPALLOC;
     static_ranges.default_allocator = bump;
 #endif
-    ThreadLocal::my_allocator = bump;
+    global_allocator = bump;
 #ifdef USE_TRACK
     atexit(report_bump_stats);
 #endif
@@ -823,6 +851,7 @@ extern "C" {
   void *malloc(size_t size)
   {
     Realm::Allocator *allocator = Realm::ThreadLocal::my_allocator;
+    if(!allocator) allocator = Realm::global_allocator;
     void *newptr = (allocator ? allocator->malloc(size, 0) :
 		                __libc_malloc(size));
 #ifdef SANITY_CHECK_ALLOCATIONS_IN_RANGE
@@ -836,6 +865,7 @@ extern "C" {
     size_t bytes = nmemb * size;
     if(bytes > 0) {
       Realm::Allocator *allocator = Realm::ThreadLocal::my_allocator;
+      if(!allocator) allocator = Realm::global_allocator;
       void *newptr = (allocator ? allocator->malloc(bytes, 0) :
                                   __libc_malloc(bytes));
 #ifdef SANITY_CHECK_ALLOCATIONS_IN_RANGE
@@ -852,6 +882,7 @@ extern "C" {
   {
     if(size > 0) {
       Realm::Allocator *allocator = Realm::ThreadLocal::my_allocator;
+      if(!allocator) allocator = Realm::global_allocator;
       if(allocator)
 	*memptr = allocator->malloc(size, alignment);
       else
@@ -870,6 +901,7 @@ extern "C" {
   void *aligned_alloc(size_t alignment, size_t size)
   {
     Realm::Allocator *allocator = Realm::ThreadLocal::my_allocator;
+    if(!allocator) allocator = Realm::global_allocator;
     void *newptr = (allocator ? allocator->malloc(size, alignment) :
                                 __libc_memalign(alignment, size));
 #ifdef SANITY_CHECK_ALLOCATIONS_IN_RANGE
@@ -881,6 +913,7 @@ extern "C" {
   void *memalign(size_t alignment, size_t size)
   {
     Realm::Allocator *allocator = Realm::ThreadLocal::my_allocator;
+    if(!allocator) allocator = Realm::global_allocator;
     void *newptr = (allocator ? allocator->malloc(size, alignment) :
                                 __libc_memalign(alignment, size));
 #ifdef SANITY_CHECK_ALLOCATIONS_IN_RANGE

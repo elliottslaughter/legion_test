@@ -17,6 +17,7 @@
 #define REALM_PYTHON_INTERNAL_H
 
 #include "realm/proc_impl.h"
+#include "realm/custom_malloc.h"
 
 #include "realm/python/python_source.h"
 
@@ -103,6 +104,7 @@ namespace Realm {
     
   public:
     PythonAPI *api;
+    Allocator *allocator;
   };
 
   class PythonThreadTaskScheduler;

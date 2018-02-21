@@ -492,13 +492,8 @@ namespace Realm {
     } else {
       // allocate our own space
       mapped_memory.size = size;
-#if 1
-      mapped_memory.base = memalign(ALIGNMENT, size);
-      assert(mapped_memory.base != 0);
-#else
       bool ok = mapped_memory.map();
       assert(ok);
-#endif
       base = static_cast<char *>(mapped_memory.base);
       // alignment should be fine
       assert((reinterpret_cast<uintptr_t>(base) % ALIGNMENT) == 0);
