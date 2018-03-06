@@ -1178,7 +1178,6 @@ namespace Legion {
 #endif
         PhysicalTemplate *current_template =
           local_trace->get_physical_trace()->get_current_template();
-        current_template->execute_all();
         template_completion = current_template->get_completion();
         Runtime::trigger_event(completion_event, template_completion);
         local_trace->end_trace_execution(this);
@@ -1874,6 +1873,26 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void PhysicalTemplate::execute(Memoizable *memoizable)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(memoizable != NULL);
+#endif
+      TraceLocalID op_key = memoizable->get_trace_local_id();
+      std::map<TraceLocalID,std::vector<Instruction*> >::iterator finder =
+        schedules.find(op_key);
+#ifdef DEBUG_LEGION
+      assert(finder != schedules.end());
+      assert(operations.find(op_key) != operations.end());
+      assert(operations.find(op_key)->second != NULL);
+#endif
+      for (std::vector<Instruction*>::const_iterator it =
+           finder->second.begin(); it != finder->second.end(); ++it)
+        (*it)->execute();
+    }
+
+    //--------------------------------------------------------------------------
     void PhysicalTemplate::finalize(void)
     //--------------------------------------------------------------------------
     {
@@ -1897,6 +1916,7 @@ namespace Legion {
         return;
       }
       optimize();
+      schedule_instructions();
       if (implicit_runtime->dump_physical_traces) dump_template();
       size_t num_events = events.size();
       events.clear();
@@ -2034,7 +2054,7 @@ namespace Legion {
             {
               generate[idx] = idx;
               TriggerCopyCompletion *inst =
-                instructions[idx]->as_triger_copy_completion();
+                instructions[idx]->as_trigger_copy_completion();
               std::set<unsigned> &rhs_pre = preconditions[inst->rhs];
               std::map<TraceLocalID, unsigned>::iterator finder =
                 task_entries.find(inst->lhs);
@@ -2305,6 +2325,172 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void PhysicalTemplate::schedule_instructions(void)
+    //--------------------------------------------------------------------------
+    {
+      std::vector<TraceLocalID> inst_owners;
+      std::vector<unsigned> gen(events.size(), -1U);
+      inst_owners.resize(instructions.size());
+
+      for (unsigned idx = 1; idx < instructions.size(); ++idx)
+      {
+        inst_owners[idx].first = -1U;
+        Instruction *inst = instructions[idx];
+        switch (inst->get_kind())
+        {
+          case GET_TERM_EVENT:
+          case GET_COPY_TERM_EVENT:
+          case CREATE_AP_USER_EVENT:
+          case MERGE_EVENT:
+          case ISSUE_COPY:
+          case ISSUE_FILL:
+          case SET_COPY_SYNC_EVENT:
+            {
+              gen[inst->get_lhs()] = idx;
+              break;
+            }
+          default:
+            {
+              break;
+            }
+        }
+      }
+
+      for (unsigned idx = 1; idx < instructions.size(); ++idx)
+      {
+        Instruction *inst = instructions[idx];
+        switch (inst->get_kind())
+        {
+          case ISSUE_COPY:
+            {
+              IssueCopy *copy = inst->as_issue_copy();
+#ifdef DEBUG_LEGION
+              assert(copy != NULL);
+#endif
+              TraceLocalID owner = copy->op_key;
+              inst_owners[idx] = owner;
+              unsigned precondition_gen_idx = gen[copy->precondition_idx];
+              if (precondition_gen_idx != -1U &&
+                  inst_owners[precondition_gen_idx].first == -1U)
+                inst_owners[precondition_gen_idx] = owner;
+              break;
+            }
+          case ISSUE_FILL:
+            {
+              IssueFill *fill = inst->as_issue_fill();
+#ifdef DEBUG_LEGION
+              assert(fill != NULL);
+#endif
+              TraceLocalID owner = fill->op_key;
+              inst_owners[idx] = owner;
+              unsigned precondition_gen_idx = gen[fill->precondition_idx];
+              if (precondition_gen_idx != -1U &&
+                  inst_owners[precondition_gen_idx].first == -1U)
+                inst_owners[precondition_gen_idx] = owner;
+              break;
+            }
+          case SET_READY_EVENT:
+            {
+              SetReadyEvent *set_ready = inst->as_set_ready_event();
+#ifdef DEBUG_LEGION
+              assert(set_ready != NULL);
+#endif
+              TraceLocalID owner = set_ready->op_key;
+              inst_owners[idx] = owner;
+              unsigned ready_event_gen_idx = gen[set_ready->ready_event_idx];
+              if (ready_event_gen_idx != -1U &&
+                  inst_owners[ready_event_gen_idx].first == -1U)
+                inst_owners[ready_event_gen_idx] = owner;
+              break;
+            }
+          case TRIGGER_EVENT:
+            {
+              TriggerEvent *trigger_event = inst->as_trigger_event();
+              unsigned lhs_gen_idx = gen[trigger_event->lhs];
+              unsigned rhs_gen_idx = gen[trigger_event->rhs];
+#ifdef DEBUG_LEGION
+              assert(lhs_gen_idx != -1U);
+              assert(rhs_gen_idx != -1U);
+              assert(inst_owners[rhs_gen_idx].first != -1U);
+#endif
+              inst_owners[idx] = inst_owners[rhs_gen_idx];
+              inst_owners[lhs_gen_idx] = inst_owners[rhs_gen_idx];
+              break;
+            }
+          case TRIGGER_COPY_COMPLETION:
+            {
+              TriggerCopyCompletion *trigger_complete =
+                inst->as_trigger_copy_completion();
+              unsigned rhs_gen_idx = gen[trigger_complete->rhs];
+#ifdef DEBUG_LEGION
+              assert(rhs_gen_idx != -1U);
+#endif
+              TraceLocalID owner = trigger_complete->lhs;
+              inst_owners[idx] = owner;
+              if (inst_owners[rhs_gen_idx].first == -1U)
+                inst_owners[rhs_gen_idx] = owner;
+              break;
+            }
+          case GET_TERM_EVENT:
+          case GET_COPY_TERM_EVENT:
+          case SET_COPY_SYNC_EVENT:
+          case LAUNCH_TASK:
+            {
+              inst_owners[idx] = inst->get_owner();
+              break;
+            }
+          case CREATE_AP_USER_EVENT:
+          case MERGE_EVENT:
+            {
+              break;
+            }
+          default:
+            {
+              assert(false);
+              break;
+            }
+        }
+      }
+
+      bool done = false;
+      while (!done)
+      {
+        done = true;
+        for (unsigned idx = instructions.size() - 1; idx > 0; --idx)
+        {
+          Instruction *inst = instructions[idx];
+          if (inst->get_kind() == MERGE_EVENT)
+          {
+            MergeEvent *merge = inst->as_merge_event();
+            if (inst_owners[idx].first != -1U)
+            {
+              const TraceLocalID &owner = inst_owners[idx];
+              const std::set<unsigned> &rhs = merge->rhs;
+              for (std::set<unsigned>::iterator it = rhs.begin();
+                   it != rhs.end(); ++it)
+              {
+                unsigned rh_gen = gen[*it];
+                if (rh_gen != -1U && inst_owners[rh_gen].first == -1U)
+                  inst_owners[rh_gen] = owner;
+              }
+            }
+            else
+              done = false;
+          }
+        }
+      }
+
+      for (unsigned idx = 1; idx < instructions.size(); ++idx)
+      {
+        const TraceLocalID &owner = inst_owners[idx];
+#ifdef DEBUG_LEGION
+        assert(owner.first != -1U);
+#endif
+        schedules[owner].push_back(instructions[idx]);
+      }
+    }
+
+    //--------------------------------------------------------------------------
     /*static*/ inline std::string PhysicalTemplate::view_to_string(
                                                        const InstanceView *view)
     //--------------------------------------------------------------------------
@@ -2345,9 +2531,30 @@ namespace Legion {
       std::cerr << "#### " << (replayable ? "Replayable" : "Non-replayable")
                 << " Template " << this << " ####" << std::endl;
       std::cerr << "[Instructions]" << std::endl;
-      for (std::vector<Instruction*>::iterator it = instructions.begin();
-           it != instructions.end(); ++it)
-        std::cerr << "  " << (*it)->to_string() << std::endl;
+      if (schedules.size() > 0)
+        for (std::map<TraceLocalID,std::vector<Instruction*> >::iterator it =
+             schedules.begin(); it != schedules.end(); ++it)
+        {
+          const TraceLocalID &op_key = it->first;
+          std::stringstream ss;
+          ss << "operations[" << op_key.first << ",";
+          if (op_key.second.dim > 1) ss << "(";
+          for (int dim = 0; dim < op_key.second.dim; ++dim)
+          {
+            if (dim > 0) ss << ",";
+            ss << op_key.second[dim];
+          }
+          if (op_key.second.dim > 1) ss << ")";
+          ss << ")]";
+          std::cerr << "  " << ss.str() << std::endl;
+          for (std::vector<Instruction*>::iterator iit = it->second.begin();
+               iit != it->second.end(); ++iit)
+          std::cerr << "    " << (*iit)->to_string() << std::endl;
+        }
+      else
+        for (std::vector<Instruction*>::iterator it = instructions.begin();
+            it != instructions.end(); ++it)
+          std::cerr << "  " << (*it)->to_string() << std::endl;
       for (std::map<unsigned, unsigned>::iterator it = frontiers.begin();
            it != frontiers.end(); ++it)
         std::cerr << "  events[" << it->second << "] = events["

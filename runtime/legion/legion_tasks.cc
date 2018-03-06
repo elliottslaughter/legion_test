@@ -5780,6 +5780,7 @@ namespace Legion {
       add_mapping_reference(gen);
       tpl->register_operation(this);
       complete_mapping();
+      tpl->execute(get_memoizable());
     }
 
     //--------------------------------------------------------------------------
@@ -6551,6 +6552,7 @@ namespace Legion {
       add_mapping_reference(gen);
       tpl->register_operation(this);
       complete_mapping();
+      tpl->execute(get_memoizable());
     }
 
     //--------------------------------------------------------------------------
