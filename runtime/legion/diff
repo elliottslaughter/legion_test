@@ -1,0 +1,94 @@
+diff --git a/runtime/legion/legion_trace.cc b/runtime/legion/legion_trace.cc
+index 30a2b84..a7b2dbc 100644
+--- a/runtime/legion/legion_trace.cc
++++ b/runtime/legion/legion_trace.cc
+@@ -1182,27 +1182,10 @@ namespace Legion {
+         template_completion = current_template->get_completion();
+         Runtime::trigger_event(completion_event, template_completion);
+         local_trace->end_trace_execution(this);
+-        switch (fence_kind)
+-        {
+-          case MAPPING_FENCE:
+-            {
+-              parent_ctx->update_current_fence(this, true, false);
+-              break;
+-            }
+-          case MIXED_FENCE:
+-            {
+-              parent_ctx->update_current_fence(this, true, true);
+-              break;
+-            }
+-          case EXECUTION_FENCE:
+-            {
+-              parent_ctx->update_current_fence(this, false, true);
+-              break;
+-            }
+-          default:
+-            assert(false);
+-        }
+         parent_ctx->record_previous_trace(local_trace);
++        execution_precondition = 
++          parent_ctx->perform_fence_analysis(this, false, true);
++        parent_ctx->update_current_fence(this, false, true);
+         local_trace->initialize_tracing_state();
+         replayed = true;
+         return;
+@@ -1220,33 +1203,7 @@ namespace Legion {
+       // This also registers that we have dependences on all operations
+       // in the trace.
+       local_trace->end_trace_execution(this);
+-#ifdef LEGION_SPY
+-      // For Legion Spy we still have to run through the full fence analysis
+       FenceOp::trigger_dependence_analysis();
+-#else
+-      // Now update the parent context with this fence before we can complete
+-      // the dependence analysis and possibly be deactivated
+-      switch (fence_kind)
+-      {
+-        case MAPPING_FENCE:
+-          {
+-            parent_ctx->update_current_fence(this, true, false);
+-            break;
+-          }
+-        case EXECUTION_FENCE:
+-          {
+-            parent_ctx->update_current_fence(this, false, true);
+-            break;
+-          }
+-        case MIXED_FENCE:
+-          {
+-            parent_ctx->update_current_fence(this, true, true);
+-            break;
+-          }
+-        default:
+-          assert(false);
+-      }
+-#endif
+       // If this is a static trace, then we remove our reference when we're done
+       if (local_trace->is_static_trace())
+       {
+@@ -1393,18 +1350,19 @@ namespace Legion {
+           physical_trace->check_template_preconditions();
+ 
+         // Register this fence with all previous users in the parent's context
+-        perform_fence_analysis();
++        execution_precondition =
++          parent_ctx->perform_fence_analysis(this, false, true);
+       }
+ 
++      // Now update the parent context with this fence before we can complete
++      // the dependence analysis and possibly be deactivated
++      parent_ctx->update_current_fence(this, false, true);
++
+       if (physical_trace->get_current_template() != NULL)
+       {
+         physical_trace->initialize_template(get_completion_event(), recurrent);
+         local_trace->set_state_replay();
+       }
+-
+-      // Now update the parent context with this fence before we can complete
+-      // the dependence analysis and possibly be deactivated
+-      update_current_fence();
+     }
+ 
+     /////////////////////////////////////////////////////////////

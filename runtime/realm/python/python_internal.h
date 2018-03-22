@@ -128,6 +128,9 @@ namespace Realm {
     virtual void execute_task(Processor::TaskFuncID func_id,
 			      const ByteArrayRef& task_args);
 
+    // starts worker threads and performs any per-processor initialization
+    virtual void start_threads(void);
+
     virtual void shutdown(void);
 
     virtual void add_to_group(ProcessorGroup *group);
@@ -188,11 +191,14 @@ namespace Realm {
     //   should release the GIL)
     virtual void thread_blocking(Thread *thread);
 
+    virtual void thread_ready(Thread *thread);
+
   protected:
     virtual Thread *worker_create(bool make_active);
     virtual void worker_terminate(Thread *switch_to);
 
     LocalPythonProcessor *pyproc;
+    bool interpreter_ready;
     std::list<LocalPythonProcessor::TaskRegistration *> taskreg_queue;
     std::map<Thread *, PyThreadState *> pythreads;
   };
