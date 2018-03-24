@@ -2330,6 +2330,11 @@ namespace Legion {
           new_instructions.push_back(new_launch_task);
       }
       instructions.swap(new_instructions);
+      for (std::map<TraceLocalID, Operation*>::iterator it =
+           operations.begin(); it != operations.end(); ++it)
+        if (it->second->get_operation_kind() == Operation::TASK_OP_KIND &&
+            last_set_ready_event.find(it->first) == last_set_ready_event.end())
+          instructions.push_back(new LaunchTask(*this, it->first));
     }
 
     //--------------------------------------------------------------------------
