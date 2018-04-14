@@ -2049,7 +2049,6 @@ namespace Legion {
           ApEvent ready = target_views[idx2]->find_user_precondition(usage, 
                             term_event, ref.get_valid_fields(), op, idx1, 
                             &info, map_applied_events, trace_info);
-          ref.set_ready_event(ready);
           if (trace_info.recording)
           {
 #ifdef DEBUG_LEGION
@@ -2062,6 +2061,7 @@ namespace Legion {
                                                    ref.get_valid_fields(),
                                                    logical_ctx, physical_ctx);
           }
+          ref.set_ready_event(ready);
         }
       }
       // Then do the registration pass
@@ -14635,7 +14635,6 @@ namespace Legion {
                                    user_mask, info.op, info.index, 
                                    &info.version_info, info.map_applied_events,
                                    trace_info);
-            ref.set_ready_event(ready);
             if (trace_info.recording)
             {
 #ifdef DEBUG_LEGION
@@ -14648,6 +14647,7 @@ namespace Legion {
                                                      info.logical_ctx,
                                                      info.ctx);
             }
+            ref.set_ready_event(ready);
             new_views[idx] = new_view;
           }
           else
@@ -14657,7 +14657,6 @@ namespace Legion {
                                          info.op, info.index,&info.version_info,
                                          local_space, info.map_applied_events,
                                          trace_info);
-            ref.set_ready_event(ready);
             if (trace_info.recording)
             {
 #ifdef DEBUG_LEGION
@@ -14670,6 +14669,7 @@ namespace Legion {
                                                      info.logical_ctx,
                                                      info.ctx);
             }
+            ref.set_ready_event(ready);
           }
           if (!defer_add_users && !!restricted_fields)
           {
@@ -14858,7 +14858,6 @@ namespace Legion {
                 usage, term_event, ref.get_valid_fields(), info.op, info.index,
                 &info.version_info, local_space, info.map_applied_events,
                 trace_info);
-            ref.set_ready_event(ready);
             if (trace_info.recording)
             {
 #ifdef DEBUG_LEGION
@@ -14872,6 +14871,7 @@ namespace Legion {
                                                      info.logical_ctx,
                                                      info.ctx);
             }
+            ref.set_ready_event(ready);
             if (!!restricted_fields && !IS_READ_ONLY(info.req))
             {
               FieldMask restricted = ref.get_valid_fields() & restricted_fields;
@@ -14894,7 +14894,6 @@ namespace Legion {
                     usage, term_event, ref.get_valid_fields(), info.op, 
                     info.index, &info.version_info, info.map_applied_events,
                     trace_info);
-              ref.set_ready_event(ready);
               if (trace_info.recording)
               {
 #ifdef DEBUG_LEGION
@@ -14908,6 +14907,7 @@ namespace Legion {
                                                        info.logical_ctx,
                                                        info.ctx);
               }
+              ref.set_ready_event(ready);
             }
             const bool restricted_out = 
               !!restricted_fields && !IS_READ_ONLY(info.req);
