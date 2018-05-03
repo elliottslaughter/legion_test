@@ -25,7 +25,7 @@ local log = require("common/log")
 local pretty = require("regent/pretty")
 local profile = require("regent/profile")
 local report = require("common/report")
-
+local crc32 = require("common/crc32")
 local std = {}
 
 std.config, std.args = base.config, base.args
@@ -3497,7 +3497,9 @@ function std.setup(main_task, extra_setup_thunk, task_wrappers, registration_nam
 
       local layout_constraints = terralib.newsymbol(
         c.legion_task_layout_constraint_set_t, "layout_constraints")
+
       local layout_constraint_actions = terralib.newlist()
+
       if std.config["layout-constraints"] then
         local fn_type = task:get_type()
         local param_types = fn_type.parameters
@@ -3549,8 +3551,11 @@ function std.setup(main_task, extra_setup_thunk, task_wrappers, registration_nam
             [task:get_name():concat(".")],
             execution_constraints, layout_constraints, options,
             [task_wrappers[variant:wrapper_name()]], nil, 0)
+
           c.legion_execution_constraint_set_destroy(execution_constraints)
+
           c.legion_task_layout_constraint_set_destroy(layout_constraints)
+
         end)
       end
 
@@ -3693,15 +3698,74 @@ terra Pipe:read_string() : &int8
   return str
 end
 
+-- after codegen in completed 
+-- if std.config["incr-comp"] is true
+local function incremental_compile_tasks() 
+
+  local pclog = log.make_logger('incr_compile')
+  local objfiles = terralib.newlist()
+
+  -- for all tasks
+  for _,variant in ipairs(variants) do
+    local exports = {}
+    exports[variant:wrapper_name()] = variant:make_wrapper()
+
+    local llvm_bitcode = {}
+    llvm_bitcode =  terralib.saveobj({}, "llvmir", exports)
+
+    local checksum = 0
+    checksum = crc32.crc32(llvm_bitcode)
+
+-- if file exists then we add it to the list of object files       
+    local checksumfile = {}
+    local cache_filename = {}
+    local homedir = os.getenv('HOME')
+    cache_filename = homedir .. "/.cache/" .. variant:wrapper_name() .. tostring(checksum) .. ".o"
+
+-- if file doesn't exist then save the object file    
+   if  (c.access(cache_filename, c.F_OK) == -1) then
+    pclog:info('cached file does not exist '  .. cache_filename)
+    local objtmp = os.tmpname() .. ".o"
+    local mvcmd = {}
+    terralib.saveobj(objtmp, "object", exports)
+    mvcmd = "mv " .. objtmp  ..  " " .. cache_filename
+    os.execute(mvcmd);
+   else
+    pclog:info('cached file does exist '  .. cache_filename)
+   end
+  objfiles:insert(cache_filename)
+ end
+
+  -- Declare all task wrappers using a (fake) header file, so the compiler will
+  -- expect them to be linked-in later.
+  local header = [[
+#include "legion.h"
+#include "legion_terra.h"
+#include "legion_terra_partitions.h"
+]] ..
+  table.concat(
+    variants:map(function(variant) return variant:wrapper_sig() .. '\n' end)
+  )
+  local task_wrappers = terralib.includecstring(header)
+
+  return objfiles,task_wrappers
+end
+
+
 local function compile_tasks_in_parallel()
   -- Force codegen; the main process will need to codegen later anyway, so we
   -- might as well do it now and not duplicate the work on the children.
+
   for _,variant in ipairs(variants) do
     variant.task:complete()
   end
-
   -- Don't spawn extra processes if jobs == 1.
   local num_slaves = math.max(tonumber(std.config["jobs"]) or 1, 1)
+
+  if  std.config["incr-comp"] then
+   return incremental_compile_tasks() 
+  end
+
   if num_slaves == 1 then
     return terralib.newlist(), make_task_wrappers()
   end
@@ -3742,6 +3806,7 @@ local function compile_tasks_in_parallel()
                    tostring(variant) .. ' to file ' .. filename)
         local exports = {}
         exports[variant:wrapper_name()] = variant:make_wrapper()
+
         profile('compile', variant, function()
           terralib.saveobj(filename, 'object', exports)
         end)()
@@ -3850,6 +3915,7 @@ function std.saveobj(main_task, filename, filetype, extra_setup_thunk, link_flag
   local objfiles,task_wrappers = compile_tasks_in_parallel()
   flags:insertall(objfiles)
   local main, names = std.setup(main_task, extra_setup_thunk, task_wrappers)
+
   local use_cmake = os.getenv("USE_CMAKE") == "1"
   local lib_dir = os.getenv("LG_RT_DIR") .. "/../bindings/regent"
   if use_cmake then
@@ -3873,6 +3939,7 @@ function std.saveobj(main_task, filename, filetype, extra_setup_thunk, link_flag
   if use_cmake then
     flags:insertall({"-llegion", "-lrealm"})
   end
+
   profile('compile', nil, function()
     if filetype ~= nil then
       terralib.saveobj(filename, filetype, names, flags)
