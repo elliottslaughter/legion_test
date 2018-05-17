@@ -1,5 +1,6 @@
 # Legion 
 
+Test edit for CI
 
 [Legion](http://legion.stanford.edu) is a parallel programming model
 for distributed, heterogeneous machines.
